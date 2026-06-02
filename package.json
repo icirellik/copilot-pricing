@@ -1,0 +1,44 @@
+{
+  "name": "copilot-price",
+  "version": "1.0.0",
+  "description": "Show your GitHub Copilot AI credit (AIC) usage for today, from local midnight",
+  "license": "ISC",
+  "author": "Cameron Rollheiser <together@icirellik.com>",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "copilot-price": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "compile": "tsc --build tsconfig.json && tsup && node scripts/build-ratecard.mjs",
+    "dev": "tsup --watch",
+    "clean": "tsc --build --clean tsconfig.json && rm -rf ./dist",
+    "start": "npm run compile && node dist/index.js",
+    "type-check": "tsc --noEmit",
+    "eslint": "eslint .",
+    "prettier": "prettier . --write",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "@types/js-yaml": "4.0.9",
+    "@types/node": "25.7.0",
+    "cmd-ts": "0.15.0",
+    "eslint": "9.39.4",
+    "eslint-config-prettier": "10.1.8",
+    "js-yaml": "4.1.0",
+    "picocolors": "1.1.1",
+    "prettier": "3.8.3",
+    "tsup": "8.5.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.59.3",
+    "vitest": "4.1.6"
+  }
+}
