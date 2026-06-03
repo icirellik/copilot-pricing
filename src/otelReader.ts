@@ -51,9 +51,27 @@ export interface Diagnostics {
   models: string[];
 }
 
+/** A single chat span, raw, as needed to mirror it into our durable store. */
+export interface RawChatSpan {
+  spanId: string;
+  model: string | null;
+  startTimeMs: number;
+  endTimeMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  chatSessionId: string | null;
+  conversationId: string | null;
+}
+
 export interface OTelReader {
   isAvailable(): boolean;
   aggregateSince(sinceMs: number): PerModelAggregate[];
+  /** Raw chat spans (optionally only those ending after sinceMs), for ingest. */
+  readChatSpans(sinceMs?: number): RawChatSpan[];
+  /** Earliest chat span END time after sinceMs (0 if none) — for coverage. */
+  earliestEndSince(sinceMs: number): number;
   getLatestTimestamp(): number;
   getDiagnostics(): Diagnostics;
   close(): void;
@@ -145,6 +163,73 @@ class OTelReaderImpl implements OTelReader {
       cacheReadTokens: toFiniteInt(r.cacheReadTokens),
       cacheCreationTokens: toFiniteInt(r.cacheCreationTokens),
     }));
+  }
+
+  readChatSpans(sinceMs?: number): RawChatSpan[] {
+    const db = this.ensureDb();
+    if (!db) {
+      return [];
+    }
+
+    const sql =
+      'SELECT' +
+      ' s.span_id AS spanId,' +
+      ' s.request_model AS model,' +
+      ' s.start_time_ms AS startTimeMs,' +
+      ' s.end_time_ms AS endTimeMs,' +
+      ' COALESCE(s.input_tokens, 0) AS inputTokens,' +
+      ' COALESCE(s.output_tokens, 0) AS outputTokens,' +
+      ' COALESCE(s.cached_tokens, 0) AS cacheReadTokens,' +
+      ' COALESCE(CAST(cc.value AS INTEGER), 0) AS cacheCreationTokens,' +
+      ' s.chat_session_id AS chatSessionId,' +
+      ' s.conversation_id AS conversationId' +
+      ' FROM spans s' +
+      ' LEFT JOIN span_attributes cc' +
+      '  ON cc.span_id = s.span_id AND cc.key = ?' +
+      ' WHERE s.operation_name = ?' +
+      (sinceMs === undefined ? '' : ' AND s.end_time_ms > ?');
+
+    const params: Array<string | number> = [ATTR_CACHE_CREATION, OPERATION_NAME_CHAT];
+    if (sinceMs !== undefined) {
+      params.push(sinceMs);
+    }
+
+    const rows = db.prepare(sql).all(...params) as Array<{
+      spanId: string;
+      model: string | null;
+      startTimeMs: number | bigint | null;
+      endTimeMs: number | bigint | null;
+      inputTokens: number | bigint | null;
+      outputTokens: number | bigint | null;
+      cacheReadTokens: number | bigint | null;
+      cacheCreationTokens: number | bigint | null;
+      chatSessionId: string | null;
+      conversationId: string | null;
+    }>;
+
+    return rows.map((r) => ({
+      spanId: r.spanId,
+      model: r.model,
+      startTimeMs: toFiniteInt(r.startTimeMs),
+      endTimeMs: toFiniteInt(r.endTimeMs),
+      inputTokens: toFiniteInt(r.inputTokens),
+      outputTokens: toFiniteInt(r.outputTokens),
+      cacheReadTokens: toFiniteInt(r.cacheReadTokens),
+      cacheCreationTokens: toFiniteInt(r.cacheCreationTokens),
+      chatSessionId: r.chatSessionId,
+      conversationId: r.conversationId,
+    }));
+  }
+
+  earliestEndSince(sinceMs: number): number {
+    const db = this.ensureDb();
+    if (!db) {
+      return 0;
+    }
+    const row = db
+      .prepare('SELECT MIN(end_time_ms) AS minTs FROM spans WHERE operation_name = ? AND end_time_ms > ?')
+      .get(OPERATION_NAME_CHAT, sinceMs) as { minTs: number | bigint | null } | undefined;
+    return toFiniteInt(row?.minTs);
   }
 
   getLatestTimestamp(): number {

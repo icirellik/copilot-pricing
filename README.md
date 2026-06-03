@@ -77,16 +77,37 @@ Notes:
 ## Usage
 
 ```bash
-copilot-price            # today's usage (since local midnight)
-copilot-price --utc      # since UTC midnight instead
-copilot-price --json     # machine-readable output
-copilot-price --doctor   # diagnose DB detection + recorded usage
-copilot-price --db <path># point at a specific agent-traces.db
-copilot-price --no-color # plain output
+copilot-price             # today's usage (since local midnight)
+copilot-price --utc       # since UTC midnight instead
+copilot-price --json      # machine-readable output
+copilot-price --doctor    # diagnose DB detection, the durable store, and recorded usage
+copilot-price --db <path> # point at a specific agent-traces.db
+copilot-price --store <p> # point at a specific durable store
+copilot-price --no-ingest # read the live source only; don't read/write the durable store
+copilot-price --no-color  # plain output
 ```
 
-The DB is auto-detected across VS Code variants; override with `--db` or the
+The source DB is auto-detected across VS Code variants; override with `--db` or the
 `COPILOT_PRICE_DB` environment variable.
+
+## Why a durable store (important)
+
+`agent-traces.db` is **not a cumulative ledger** — it's a snapshot of your *currently retained
+chat conversations*. Copilot prunes spans **per conversation**: deleting, clearing, or archiving
+a chat — or simply crossing the chat-history cap (50 conversations), or reloading the window —
+removes **all** of that conversation's token records at once. So a plain read of the source
+**silently undercounts** and the number can *drop* as the day goes on.
+
+To fix this, `copilot-price` keeps its **own append-only copy**: on every run it mirrors the
+source's chat spans into a local store (`~/.copilot-price/usage.db`), deduplicated by the
+source's `span_id` primary key. A span you've captured **survives even after Copilot drops it**,
+so totals only ever grow. Reporting is done from this store.
+
+- Location: `~/.copilot-price/usage.db` — override with `--store` or `COPILOT_PRICE_STORE`
+  (or relocate the whole dir with `COPILOT_PRICE_HOME`).
+- It can only capture what's present *when it runs*. Usage that was pruned **before** the first
+  capture is gone — so run `copilot-price` regularly (or on a schedule) to avoid morning gaps.
+  The tool warns when the earliest usage it can account for today starts well after midnight.
 
 ## Scope & accuracy
 
@@ -95,6 +116,8 @@ The DB is auto-detected across VS Code variants; override with `--db` or the
 - AIC is plan-invariant and matches GitHub's token-based billing. The figure is an estimate
   derived from local token counts × a bundled rate card, which may drift from GitHub's
   current prices.
+- The source DB is ephemeral (see above); the durable store is as complete as your run
+  cadence. `--no-ingest` bypasses the store and reads the live source only (a lower bound).
 
 ## Develop
 

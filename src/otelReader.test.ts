@@ -16,6 +16,7 @@ function seedDb(path: string): void {
     CREATE TABLE spans (
       span_id TEXT,
       chat_session_id TEXT,
+      conversation_id TEXT,
       request_model TEXT,
       input_tokens INTEGER,
       output_tokens INTEGER,
@@ -102,6 +103,31 @@ describe('OTelReader', () => {
     const rows = reader.aggregateSince(MIDNIGHT + 10_000);
     reader.close();
     expect(rows).toEqual([]);
+  });
+
+  it('readChatSpans returns raw chat spans with cache-creation joined', () => {
+    const reader = createOTelReader(dbPath);
+    const spans = reader.readChatSpans();
+    reader.close();
+
+    const byId = Object.fromEntries(spans.map((s) => [s.spanId, s]));
+    expect(Object.keys(byId).sort()).toEqual(['s1', 's2', 's3', 's4']); // chat only, no boundary
+    expect(byId['s1']).toMatchObject({ model: 'gpt-test', inputTokens: 100, cacheReadTokens: 10, cacheCreationTokens: 5 });
+    expect(byId['s2']).toMatchObject({ cacheCreationTokens: 0 });
+  });
+
+  it('readChatSpans honors the optional sinceMs boundary', () => {
+    const reader = createOTelReader(dbPath);
+    const spans = reader.readChatSpans(MIDNIGHT);
+    reader.close();
+    expect(spans.map((s) => s.spanId).sort()).toEqual(['s1', 's2', 's3']); // s4 is before midnight
+  });
+
+  it('earliestEndSince returns the earliest post-boundary chat end', () => {
+    const reader = createOTelReader(dbPath);
+    expect(reader.earliestEndSince(MIDNIGHT)).toBe(MIDNIGHT + 1000);
+    expect(reader.earliestEndSince(MIDNIGHT + 10_000)).toBe(0);
+    reader.close();
   });
 
   it('diagnostics count all chat spans all-time and report latest + models', () => {

@@ -15,6 +15,16 @@ export interface UsageRow {
   priced: boolean;
 }
 
+/** Where today's numbers came from and how complete they are. */
+export interface UsageCoverage {
+  /** 'store' = our durable copy (recommended); 'live' = source DB only. */
+  source: 'store' | 'live';
+  /** Earliest chat-span end time counted today (ms), or null if none. */
+  earliestEndMs: number | null;
+  /** Chats we retain that the live source has already pruned (store path only). */
+  rescuedChats?: number;
+}
+
 export interface UsageReport {
   sinceMs: number;
   sinceIso: string;
@@ -31,10 +41,15 @@ export interface UsageReport {
   };
   /** Models seen today with no rate-card match (their AIC is 0). */
   unpricedModels: string[];
+  coverage?: UsageCoverage;
 }
 
+// If the earliest usage we can account for today starts more than this long
+// after midnight, warn: anything before it may have been pruned before capture.
+const COVERAGE_GAP_THRESHOLD_MS = 15 * 60 * 1000;
+
 /** Build a priced usage report from raw per-model aggregates. */
-export function buildReport(aggregates: PerModelAggregate[], sinceMs: number): UsageReport {
+export function buildReport(aggregates: PerModelAggregate[], sinceMs: number, coverage?: UsageCoverage): UsageReport {
   const rows: UsageRow[] = aggregates
     .map((a) => {
       const modelId = a.model ?? 'unknown';
@@ -80,6 +95,7 @@ export function buildReport(aggregates: PerModelAggregate[], sinceMs: number): U
     rows,
     totals,
     unpricedModels: rows.filter((r) => !r.priced).map((r) => r.model),
+    coverage,
   };
 }
 
@@ -174,7 +190,35 @@ export function formatReport(report: UsageReport, useColor = true): string {
   if (report.unpricedModels.length > 0) {
     lines.push(c.yellow(`* not in rate card — AIC unpriced: ${report.unpricedModels.join(', ')}`));
   }
+  for (const notice of coverageNotices(report, c)) {
+    lines.push(notice);
+  }
   return lines.join('\n') + '\n';
+}
+
+/** Coverage/accuracy notices (rescued spans, start-of-day gap) for the footer. */
+function coverageNotices(report: UsageReport, c: typeof pc): string[] {
+  const cov = report.coverage;
+  if (!cov) {
+    return [];
+  }
+  const out: string[] = [];
+
+  if (cov.rescuedChats && cov.rescuedChats > 0) {
+    out.push(
+      c.green(`✓ Local store retained ${num(cov.rescuedChats)} chat(s) Copilot has already pruned from its own DB.`),
+    );
+  }
+
+  if (report.totals.chats > 0 && cov.earliestEndMs && cov.earliestEndMs - report.sinceMs > COVERAGE_GAP_THRESHOLD_MS) {
+    const t = new Date(cov.earliestEndMs).toLocaleTimeString();
+    out.push(
+      c.yellow(`⚠ Earliest usage counted today is ${t}.`) +
+        c.dim(' Copilot prunes old chats; usage before then may be uncaptured — run copilot-price regularly to avoid gaps.'),
+    );
+  }
+
+  return out;
 }
 
 /** Render the report as machine-readable JSON. */
