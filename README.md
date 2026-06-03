@@ -3,9 +3,8 @@
 A small CLI that shows your **GitHub Copilot AI credit (AIC) usage for today** — from local
 midnight — broken down per model, with a USD estimate.
 
-It works like [copilot-budget](https://github.com/mooracle/copilot-budget): it reads the
-**measured per-span token counts** that VS Code's Copilot Chat extension writes to a local
-OTel SQLite database (`agent-traces.db`) and prices them with a bundled rate card
+It reads the **measured per-span token counts** that VS Code's Copilot Chat extension writes
+to a local OTel SQLite database (`agent-traces.db`) and prices them with a bundled rate card
 (1 AIC = $0.01). Nothing is sent anywhere — prompt/response content is never read, only
 aggregate token counts.
 
@@ -92,7 +91,8 @@ copilot-price --watch [--interval N]  # ingest every N seconds until Ctrl-C
 copilot-price --schedule <target>  # print a launchd/cron/systemd unit (installs nothing)
 ```
 
-The source DB is auto-detected across VS Code variants; override with `--db` or the
+The source DB is auto-detected across VS Code variants (stable, Insiders, Cursor, VSCodium);
+when several are installed, the most recently used one wins. Override with `--db` or the
 `COPILOT_PRICE_DB` environment variable.
 
 ## Why a durable store (important)

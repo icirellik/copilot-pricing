@@ -25,10 +25,10 @@ const { DatabaseSync: DatabaseSyncCtor } = nodeRequire('node:sqlite') as typeof 
 // Filter `operation_name = 'chat'` matches upstream's GenAiOperationName.CHAT
 // constant — the value used for billable LLM inferences.
 //
-// Unlike copilot-budget (a long-running extension that scopes spans to the
-// active workspace's chat sessions), this is a one-shot CLI: we want EVERY
-// chat span since midnight regardless of workspace, so there is no session
-// filter — just the time boundary.
+// This is a one-shot CLI rather than a long-running extension scoped to a
+// single workspace's chat sessions: we want EVERY chat span since midnight
+// regardless of workspace, so there is no session filter — just the time
+// boundary.
 //
 // Time-boundary filter uses `end_time_ms > sinceMs` (strict): OTel writers
 // materialize a span row when the span ends (onEnd), so filtering by end_time
