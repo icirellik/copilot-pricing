@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { listDbCandidates, resolveDbPath } from './dbLocator';
+import { listDbCandidates, pickActiveDb, resolveDbPath, type DbCandidate } from './dbLocator';
 
 const ENV_KEY = 'COPILOT_PRICE_DB';
 let savedEnv: string | undefined;
@@ -42,5 +42,26 @@ describe('resolveDbPath', () => {
   it('prefers the flag over the env var', () => {
     process.env[ENV_KEY] = '/tmp/from-env/agent-traces.db';
     expect(resolveDbPath('/tmp/from-flag/agent-traces.db')).toBe('/tmp/from-flag/agent-traces.db');
+  });
+});
+
+describe('pickActiveDb', () => {
+  const cand = (editor: string, p: string, exists: boolean): DbCandidate => ({ editor, path: p, exists });
+
+  it('returns null when no candidate exists', () => {
+    expect(pickActiveDb([cand('Code', '/a', false), cand('Code - Insiders', '/b', false)])).toBeNull();
+  });
+
+  it('returns the sole existing candidate (single-editor fast path)', () => {
+    expect(pickActiveDb([cand('Code', '/a', false), cand('Code - Insiders', '/b', true)])).toBe('/b');
+  });
+
+  it('picks the most recently written DB when several editors are installed', () => {
+    const recency = (p: string): number => ({ '/a': 100, '/b': 500, '/c': 300 })[p] ?? 0;
+    const picked = pickActiveDb(
+      [cand('Code', '/a', true), cand('Code - Insiders', '/b', true), cand('Cursor', '/c', true)],
+      recency,
+    );
+    expect(picked).toBe('/b');
   });
 });

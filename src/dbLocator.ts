@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -38,16 +38,46 @@ export function listDbCandidates(): DbCandidate[] {
   });
 }
 
+/** Most recent write across the DB and its -wal sidecar (0 if unreadable). */
+function recencyMs(dbPath: string): number {
+  let mtime = 0;
+  for (const p of [dbPath, `${dbPath}-wal`]) {
+    try {
+      mtime = Math.max(mtime, statSync(p).mtimeMs);
+    } catch {
+      // missing file/sidecar — ignore
+    }
+  }
+  return mtime;
+}
+
+/**
+ * Of the existing candidate DBs, choose the one to read. With a single editor
+ * that's just that editor; when several are installed (e.g. stable VS Code AND
+ * Insiders) the most recently written DB wins, so we follow the editor you're
+ * actually using rather than a fixed priority order.
+ */
+export function pickActiveDb(candidates: DbCandidate[], recency: (p: string) => number = recencyMs): string | null {
+  const existing = candidates.filter((c) => c.exists);
+  if (existing.length === 0) {
+    return null;
+  }
+  if (existing.length === 1) {
+    return existing[0].path;
+  }
+  return existing.reduce((best, c) => (recency(c.path) > recency(best.path) ? c : best)).path;
+}
+
 /**
  * Resolve the DB path to use. An explicit override (`--db` flag or
  * `COPILOT_PRICE_DB`) is returned as-is so the caller can report a bad path;
- * otherwise the first existing candidate is returned, or null when none exist.
+ * otherwise the most recently active existing candidate is returned, or null
+ * when none exist.
  */
 export function resolveDbPath(override?: string): string | null {
   const explicit = override ?? process.env.COPILOT_PRICE_DB;
   if (explicit) {
     return explicit;
   }
-  const found = listDbCandidates().find((c) => c.exists);
-  return found ? found.path : null;
+  return pickActiveDb(listDbCandidates());
 }
