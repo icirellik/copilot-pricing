@@ -30,6 +30,7 @@ const SCHEMA = [
      output_tokens INTEGER NOT NULL DEFAULT 0,
      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
      cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+     usage_nano_aiu INTEGER,
      chat_session_id TEXT,
      conversation_id TEXT,
      first_seen_ms INTEGER NOT NULL,
@@ -43,9 +44,9 @@ const SCHEMA = [
 const UPSERT_SQL =
   'INSERT INTO chat_spans' +
   ' (span_id, model, start_time_ms, end_time_ms, input_tokens, output_tokens,' +
-  '  cache_read_tokens, cache_creation_tokens, chat_session_id, conversation_id,' +
-  '  first_seen_ms, last_seen_ms)' +
-  ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
+  '  cache_read_tokens, cache_creation_tokens, usage_nano_aiu, chat_session_id,' +
+  '  conversation_id, first_seen_ms, last_seen_ms)' +
+  ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
   ' ON CONFLICT(span_id) DO UPDATE SET' +
   '  model = excluded.model,' +
   '  start_time_ms = excluded.start_time_ms,' +
@@ -54,6 +55,9 @@ const UPSERT_SQL =
   '  output_tokens = excluded.output_tokens,' +
   '  cache_read_tokens = excluded.cache_read_tokens,' +
   '  cache_creation_tokens = excluded.cache_creation_tokens,' +
+  // COALESCE keeps a previously-captured AIU if a later read lacks it (e.g. the
+  // attribute hadn't been written yet), but lets a real value fill in a null.
+  '  usage_nano_aiu = COALESCE(excluded.usage_nano_aiu, chat_spans.usage_nano_aiu),' +
   '  chat_session_id = excluded.chat_session_id,' +
   '  conversation_id = excluded.conversation_id,' +
   '  last_seen_ms = excluded.last_seen_ms';
@@ -105,6 +109,15 @@ class UsageStoreImpl implements UsageStore {
     for (const stmt of SCHEMA) {
       this.db.exec(stmt);
     }
+    this.migrate();
+  }
+
+  /** Additive migrations for stores created by an earlier version. */
+  private migrate(): void {
+    const cols = (this.db.prepare('PRAGMA table_info(chat_spans)').all() as Array<{ name: string }>).map((c) => c.name);
+    if (!cols.includes('usage_nano_aiu')) {
+      this.db.exec('ALTER TABLE chat_spans ADD COLUMN usage_nano_aiu INTEGER');
+    }
   }
 
   ingest(spans: RawChatSpan[], nowMs: number): IngestResult {
@@ -123,6 +136,7 @@ class UsageStoreImpl implements UsageStore {
             s.outputTokens,
             s.cacheReadTokens,
             s.cacheCreationTokens,
+            s.usageNanoAiu,
             s.chatSessionId,
             s.conversationId,
             nowMs,
@@ -168,7 +182,13 @@ class UsageStoreImpl implements UsageStore {
           ' COALESCE(SUM(input_tokens), 0) AS inputTokens,' +
           ' COALESCE(SUM(output_tokens), 0) AS outputTokens,' +
           ' COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,' +
-          ' COALESCE(SUM(cache_creation_tokens), 0) AS cacheCreationTokens' +
+          ' COALESCE(SUM(cache_creation_tokens), 0) AS cacheCreationTokens,' +
+          ' COALESCE(SUM(usage_nano_aiu), 0) AS meteredNano,' +
+          ' SUM(CASE WHEN usage_nano_aiu IS NOT NULL THEN 1 ELSE 0 END) AS meteredChats,' +
+          ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN input_tokens END), 0) AS unmeteredInputTokens,' +
+          ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN output_tokens END), 0) AS unmeteredOutputTokens,' +
+          ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN cache_read_tokens END), 0) AS unmeteredCacheReadTokens,' +
+          ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN cache_creation_tokens END), 0) AS unmeteredCacheCreationTokens' +
           ' FROM chat_spans WHERE end_time_ms > ? GROUP BY model',
       )
       .all(sinceMs) as Array<{
@@ -178,6 +198,12 @@ class UsageStoreImpl implements UsageStore {
       outputTokens: number | bigint | null;
       cacheReadTokens: number | bigint | null;
       cacheCreationTokens: number | bigint | null;
+      meteredNano: number | bigint | null;
+      meteredChats: number | bigint | null;
+      unmeteredInputTokens: number | bigint | null;
+      unmeteredOutputTokens: number | bigint | null;
+      unmeteredCacheReadTokens: number | bigint | null;
+      unmeteredCacheCreationTokens: number | bigint | null;
     }>;
 
     return rows.map((r) => ({
@@ -187,6 +213,12 @@ class UsageStoreImpl implements UsageStore {
       outputTokens: toInt(r.outputTokens),
       cacheReadTokens: toInt(r.cacheReadTokens),
       cacheCreationTokens: toInt(r.cacheCreationTokens),
+      meteredAiu: toInt(r.meteredNano) / 1e9,
+      meteredChats: toInt(r.meteredChats),
+      unmeteredInputTokens: toInt(r.unmeteredInputTokens),
+      unmeteredOutputTokens: toInt(r.unmeteredOutputTokens),
+      unmeteredCacheReadTokens: toInt(r.unmeteredCacheReadTokens),
+      unmeteredCacheCreationTokens: toInt(r.unmeteredCacheCreationTokens),
     }));
   }
 

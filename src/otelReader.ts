@@ -35,6 +35,10 @@ const { DatabaseSync: DatabaseSyncCtor } = nodeRequire('node:sqlite') as typeof 
 // matches the natural arrival order.
 const OPERATION_NAME_CHAT = 'chat';
 const ATTR_CACHE_CREATION = 'gen_ai.usage.cache_creation.input_tokens';
+// Copilot's own billed credits per chat, in nano AI Units (÷1e9 = AIU ≈ AIC).
+// This is the authoritative figure; the rate card is only a fallback for spans
+// (or older data) that lack it.
+const ATTR_USAGE_NANO_AIU = 'copilot_chat.copilot_usage_nano_aiu';
 
 export interface PerModelAggregate {
   model: string | null;
@@ -43,6 +47,17 @@ export interface PerModelAggregate {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  // Metering split (optional; absent for legacy/token-only aggregates):
+  /** Σ of Copilot's stored AIU over the chats that carry it. */
+  meteredAiu?: number;
+  /** How many chats carried a stored AIU value. */
+  meteredChats?: number;
+  // Token sums for the chats WITHOUT a stored AIU, so the caller can price just
+  // those via the rate card without double-charging the metered ones.
+  unmeteredInputTokens?: number;
+  unmeteredOutputTokens?: number;
+  unmeteredCacheReadTokens?: number;
+  unmeteredCacheCreationTokens?: number;
 }
 
 export interface Diagnostics {
@@ -61,6 +76,8 @@ export interface RawChatSpan {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  /** Copilot's stored credits in nano AIU, or null when the span lacks it. */
+  usageNanoAiu: number | null;
   chatSessionId: string | null;
   conversationId: string | null;
 }
@@ -138,21 +155,35 @@ class OTelReaderImpl implements OTelReader {
       ' COALESCE(SUM(s.input_tokens), 0) AS inputTokens,' +
       ' COALESCE(SUM(s.output_tokens), 0) AS outputTokens,' +
       ' COALESCE(SUM(s.cached_tokens), 0) AS cacheReadTokens,' +
-      ' COALESCE(SUM(CAST(cc.value AS INTEGER)), 0) AS cacheCreationTokens' +
+      ' COALESCE(SUM(CAST(cc.value AS INTEGER)), 0) AS cacheCreationTokens,' +
+      ' COALESCE(SUM(CAST(au.value AS REAL)), 0) AS meteredNano,' +
+      ' SUM(CASE WHEN au.value IS NOT NULL THEN 1 ELSE 0 END) AS meteredChats,' +
+      ' COALESCE(SUM(CASE WHEN au.value IS NULL THEN s.input_tokens END), 0) AS unmeteredInputTokens,' +
+      ' COALESCE(SUM(CASE WHEN au.value IS NULL THEN s.output_tokens END), 0) AS unmeteredOutputTokens,' +
+      ' COALESCE(SUM(CASE WHEN au.value IS NULL THEN s.cached_tokens END), 0) AS unmeteredCacheReadTokens,' +
+      ' COALESCE(SUM(CASE WHEN au.value IS NULL THEN CAST(cc.value AS INTEGER) END), 0) AS unmeteredCacheCreationTokens' +
       ' FROM spans s' +
       ' LEFT JOIN span_attributes cc' +
       '  ON cc.span_id = s.span_id AND cc.key = ?' +
+      ' LEFT JOIN span_attributes au' +
+      '  ON au.span_id = s.span_id AND au.key = ?' +
       ' WHERE s.operation_name = ?' +
       '   AND s.end_time_ms > ?' +
       ' GROUP BY s.request_model';
 
-    const rows = db.prepare(sql).all(ATTR_CACHE_CREATION, OPERATION_NAME_CHAT, sinceMs) as Array<{
+    const rows = db.prepare(sql).all(ATTR_CACHE_CREATION, ATTR_USAGE_NANO_AIU, OPERATION_NAME_CHAT, sinceMs) as Array<{
       model: string | null;
       chats: number | bigint | null;
       inputTokens: number | bigint | null;
       outputTokens: number | bigint | null;
       cacheReadTokens: number | bigint | null;
       cacheCreationTokens: number | bigint | null;
+      meteredNano: number | bigint | null;
+      meteredChats: number | bigint | null;
+      unmeteredInputTokens: number | bigint | null;
+      unmeteredOutputTokens: number | bigint | null;
+      unmeteredCacheReadTokens: number | bigint | null;
+      unmeteredCacheCreationTokens: number | bigint | null;
     }>;
 
     return rows.map((r) => ({
@@ -162,6 +193,12 @@ class OTelReaderImpl implements OTelReader {
       outputTokens: toFiniteInt(r.outputTokens),
       cacheReadTokens: toFiniteInt(r.cacheReadTokens),
       cacheCreationTokens: toFiniteInt(r.cacheCreationTokens),
+      meteredAiu: toFiniteInt(r.meteredNano) / 1e9,
+      meteredChats: toFiniteInt(r.meteredChats),
+      unmeteredInputTokens: toFiniteInt(r.unmeteredInputTokens),
+      unmeteredOutputTokens: toFiniteInt(r.unmeteredOutputTokens),
+      unmeteredCacheReadTokens: toFiniteInt(r.unmeteredCacheReadTokens),
+      unmeteredCacheCreationTokens: toFiniteInt(r.unmeteredCacheCreationTokens),
     }));
   }
 
@@ -181,15 +218,18 @@ class OTelReaderImpl implements OTelReader {
       ' COALESCE(s.output_tokens, 0) AS outputTokens,' +
       ' COALESCE(s.cached_tokens, 0) AS cacheReadTokens,' +
       ' COALESCE(CAST(cc.value AS INTEGER), 0) AS cacheCreationTokens,' +
+      ' au.value AS usageNanoAiu,' +
       ' s.chat_session_id AS chatSessionId,' +
       ' s.conversation_id AS conversationId' +
       ' FROM spans s' +
       ' LEFT JOIN span_attributes cc' +
       '  ON cc.span_id = s.span_id AND cc.key = ?' +
+      ' LEFT JOIN span_attributes au' +
+      '  ON au.span_id = s.span_id AND au.key = ?' +
       ' WHERE s.operation_name = ?' +
       (sinceMs === undefined ? '' : ' AND s.end_time_ms > ?');
 
-    const params: Array<string | number> = [ATTR_CACHE_CREATION, OPERATION_NAME_CHAT];
+    const params: Array<string | number> = [ATTR_CACHE_CREATION, ATTR_USAGE_NANO_AIU, OPERATION_NAME_CHAT];
     if (sinceMs !== undefined) {
       params.push(sinceMs);
     }
@@ -203,6 +243,7 @@ class OTelReaderImpl implements OTelReader {
       outputTokens: number | bigint | null;
       cacheReadTokens: number | bigint | null;
       cacheCreationTokens: number | bigint | null;
+      usageNanoAiu: string | number | bigint | null;
       chatSessionId: string | null;
       conversationId: string | null;
     }>;
@@ -216,6 +257,7 @@ class OTelReaderImpl implements OTelReader {
       outputTokens: toFiniteInt(r.outputTokens),
       cacheReadTokens: toFiniteInt(r.cacheReadTokens),
       cacheCreationTokens: toFiniteInt(r.cacheCreationTokens),
+      usageNanoAiu: toNullableInt(r.usageNanoAiu),
       chatSessionId: r.chatSessionId,
       conversationId: r.conversationId,
     }));
@@ -282,6 +324,15 @@ function toFiniteInt(value: number | bigint | null | undefined): number {
   }
   const n = typeof value === 'bigint' ? Number(value) : value;
   return Number.isFinite(n) ? n : 0;
+}
+
+/** Like toFiniteInt but preserves the absent/NULL case as null (not 0). */
+function toNullableInt(value: string | number | bigint | null | undefined): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 /** Construct a lazy OTelReader for the given agent-traces.db path. */

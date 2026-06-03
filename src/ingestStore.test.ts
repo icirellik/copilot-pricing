@@ -17,6 +17,7 @@ function span(over: Partial<RawChatSpan> & Pick<RawChatSpan, 'spanId'>): RawChat
     outputTokens: 10,
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
+    usageNanoAiu: null,
     chatSessionId: 'sess',
     conversationId: 'conv',
     ...over,
@@ -107,6 +108,32 @@ describe('UsageStore', () => {
     expect(store.lastIngestMs()).toBe(NOW);
     store.ingest([], NOW + 5000);
     expect(store.lastIngestMs()).toBe(NOW + 5000);
+  });
+
+  it('aggregates stored AIU and splits out un-metered token sums', () => {
+    store.ingest(
+      [
+        span({ spanId: 'm1', usageNanoAiu: 2_000_000_000, inputTokens: 1000 }), // 2.0 AIU, metered
+        span({ spanId: 'm2', usageNanoAiu: 500_000_000, inputTokens: 2000 }), //  0.5 AIU, metered
+        span({ spanId: 'u1', usageNanoAiu: null, inputTokens: 4000, outputTokens: 7 }), // un-metered
+      ],
+      NOW,
+    );
+    const agg = store.aggregateSince(MIDNIGHT);
+    expect(agg).toHaveLength(1);
+    expect(agg[0]).toMatchObject({
+      chats: 3,
+      meteredChats: 2,
+      meteredAiu: 2.5,
+      unmeteredInputTokens: 4000, // u1 only
+      unmeteredOutputTokens: 7,
+    });
+  });
+
+  it('keeps a captured AIU when a later read of the same span lacks it', () => {
+    store.ingest([span({ spanId: 'x', usageNanoAiu: 3_000_000_000 })], NOW);
+    store.ingest([span({ spanId: 'x', usageNanoAiu: null })], NOW + 1);
+    expect(store.aggregateSince(MIDNIGHT)[0]).toMatchObject({ meteredChats: 1, meteredAiu: 3 });
   });
 });
 

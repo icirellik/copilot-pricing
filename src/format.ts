@@ -10,9 +10,16 @@ export interface UsageRow {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  /** Total AIC for the model: Copilot's metered AIU + rate-card estimate. */
   aic: number;
-  /** Whether the model matched a rate card (false → AIC could not be priced). */
-  priced: boolean;
+  /** Portion of `aic` taken straight from Copilot's stored AIU. */
+  meteredAiu: number;
+  /** Portion of `aic` estimated from the rate card (for un-metered chats). */
+  estimatedAic: number;
+  /** How many of the model's chats carried a stored AIU value. */
+  meteredChats: number;
+  /** True when un-metered chats exist for a model with no rate card → cost is 0/unknown. */
+  estimatedUnpriced: boolean;
 }
 
 /** Where today's numbers came from and how complete they are. */
@@ -38,8 +45,14 @@ export interface UsageReport {
     tokens: number;
     aic: number;
     usd: number;
+    /** AIC taken from Copilot's stored AIU (authoritative). */
+    meteredAiu: number;
+    /** AIC estimated from the rate card (fallback for un-metered chats). */
+    estimatedAic: number;
+    /** Chats counted via Copilot's stored AIU. */
+    meteredChats: number;
   };
-  /** Models seen today with no rate-card match (their AIC is 0). */
+  /** Models with un-metered chats and no rate-card match (counted as 0). */
   unpricedModels: string[];
   coverage?: UsageCoverage;
 }
@@ -53,13 +66,22 @@ export function buildReport(aggregates: PerModelAggregate[], sinceMs: number, co
   const rows: UsageRow[] = aggregates
     .map((a) => {
       const modelId = a.model ?? 'unknown';
-      const priced = getRateCard(modelId) !== null;
-      const aic = computeCost(modelId, {
-        input: a.inputTokens,
-        output: a.outputTokens,
-        cacheRead: a.cacheReadTokens,
-        cacheCreation: a.cacheCreationTokens,
+      const hasCard = getRateCard(modelId) !== null;
+      const meteredAiu = a.meteredAiu ?? 0;
+      const meteredChats = a.meteredChats ?? 0;
+
+      // Price only the chats Copilot DIDN'T meter (fall back to the rate card).
+      // If the aggregate carries no metering split (legacy/source path), the
+      // un-metered token sums equal the full sums.
+      const hasSplit = a.unmeteredInputTokens !== undefined;
+      const estimatedAic = computeCost(modelId, {
+        input: hasSplit ? (a.unmeteredInputTokens ?? 0) : a.inputTokens,
+        output: hasSplit ? (a.unmeteredOutputTokens ?? 0) : a.outputTokens,
+        cacheRead: hasSplit ? (a.unmeteredCacheReadTokens ?? 0) : a.cacheReadTokens,
+        cacheCreation: hasSplit ? (a.unmeteredCacheCreationTokens ?? 0) : a.cacheCreationTokens,
       });
+
+      const unmeteredChats = a.chats - meteredChats;
       return {
         model: getDisplayName(modelId),
         modelId,
@@ -68,8 +90,11 @@ export function buildReport(aggregates: PerModelAggregate[], sinceMs: number, co
         outputTokens: a.outputTokens,
         cacheReadTokens: a.cacheReadTokens,
         cacheCreationTokens: a.cacheCreationTokens,
-        aic,
-        priced,
+        aic: meteredAiu + estimatedAic,
+        meteredAiu,
+        estimatedAic,
+        meteredChats,
+        estimatedUnpriced: unmeteredChats > 0 && !hasCard,
       };
     })
     .sort((x, y) => y.aic - x.aic || y.inputTokens + y.outputTokens - (x.inputTokens + x.outputTokens));
@@ -82,9 +107,24 @@ export function buildReport(aggregates: PerModelAggregate[], sinceMs: number, co
       acc.cacheReadTokens += r.cacheReadTokens;
       acc.cacheCreationTokens += r.cacheCreationTokens;
       acc.aic += r.aic;
+      acc.meteredAiu += r.meteredAiu;
+      acc.estimatedAic += r.estimatedAic;
+      acc.meteredChats += r.meteredChats;
       return acc;
     },
-    { chats: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, aic: 0, tokens: 0, usd: 0 },
+    {
+      chats: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      aic: 0,
+      tokens: 0,
+      usd: 0,
+      meteredAiu: 0,
+      estimatedAic: 0,
+      meteredChats: 0,
+    },
   );
   totals.tokens = totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheCreationTokens;
   totals.usd = totals.aic / 100;
@@ -94,7 +134,7 @@ export function buildReport(aggregates: PerModelAggregate[], sinceMs: number, co
     sinceIso: new Date(sinceMs).toISOString(),
     rows,
     totals,
-    unpricedModels: rows.filter((r) => !r.priced).map((r) => r.model),
+    unpricedModels: rows.filter((r) => r.estimatedUnpriced).map((r) => r.model),
     coverage,
   };
 }
@@ -118,7 +158,7 @@ interface Column {
 }
 
 const COLUMNS: Column[] = [
-  { header: 'MODEL', align: 'left', value: (r) => (r.priced ? r.model : `${r.model} *`) },
+  { header: 'MODEL', align: 'left', value: (r) => (r.estimatedUnpriced ? `${r.model} *` : r.model) },
   { header: 'CHATS', align: 'right', value: (r) => num(r.chats) },
   { header: 'INPUT', align: 'right', value: (r) => num(r.inputTokens) },
   { header: 'OUTPUT', align: 'right', value: (r) => num(r.outputTokens) },
@@ -155,7 +195,10 @@ export function formatReport(report: UsageReport, useColor = true): string {
     cacheReadTokens: report.totals.cacheReadTokens,
     cacheCreationTokens: report.totals.cacheCreationTokens,
     aic: report.totals.aic,
-    priced: true,
+    meteredAiu: report.totals.meteredAiu,
+    estimatedAic: report.totals.estimatedAic,
+    meteredChats: report.totals.meteredChats,
+    estimatedUnpriced: false,
   };
 
   const bodyRows = [...report.rows, totalRow];
@@ -187,13 +230,32 @@ export function formatReport(report: UsageReport, useColor = true): string {
   lines.push(
     c.bold(`Total: ${aic(report.totals.aic)} AIC`) + c.dim(`  (≈ ${usd(report.totals.usd)}, ${num(report.totals.tokens)} tokens)`),
   );
+  lines.push(sourceNote(report, c));
   if (report.unpricedModels.length > 0) {
-    lines.push(c.yellow(`* not in rate card — AIC unpriced: ${report.unpricedModels.join(', ')}`));
+    lines.push(c.yellow(`* un-metered chats for a model not in the rate card — counted as 0: ${report.unpricedModels.join(', ')}`));
   }
   for (const notice of coverageNotices(report, c)) {
     lines.push(notice);
   }
   return lines.join('\n') + '\n';
+}
+
+/** One-line explanation of where the AIC came from (metered vs estimated). */
+function sourceNote(report: UsageReport, c: typeof pc): string {
+  const { chats, meteredChats } = report.totals;
+  if (chats === 0) {
+    return c.dim('AIC source: none.');
+  }
+  if (meteredChats === chats) {
+    return c.dim(`AIC source: Copilot's metered value for all ${num(chats)} chats.`);
+  }
+  if (meteredChats === 0) {
+    return c.dim(`AIC source: estimated from the rate card (no metered values present).`);
+  }
+  return c.dim(
+    `AIC source: Copilot's metered value for ${num(meteredChats)}/${num(chats)} chats; ` +
+      `${num(chats - meteredChats)} estimated from the rate card (${aic(report.totals.estimatedAic)} AIC).`,
+  );
 }
 
 /** Coverage/accuracy notices (rescued spans, start-of-day gap) for the footer. */

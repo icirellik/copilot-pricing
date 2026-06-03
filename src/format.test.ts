@@ -39,15 +39,68 @@ describe('buildReport', () => {
     const report = buildReport(aggregates, MIDNIGHT);
     expect(report.rows.map((r) => r.model)).toEqual(['gpt-test', 'mystery']);
   });
+
+  it('prefers Copilot metered AIU and only estimates un-metered chats', () => {
+    // 3 chats of gpt-test: 2 metered at 5 AIU total, 1 un-metered with token cost.
+    // un-metered span: input 1M total = 1M fresh (no cache) → 1M@100 + 1M output@200 = 300 AIC.
+    const metered = [
+      {
+        model: 'gpt-test',
+        chats: 3,
+        inputTokens: 3_000_000,
+        outputTokens: 1_000_000,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        meteredAiu: 5,
+        meteredChats: 2,
+        unmeteredInputTokens: 1_000_000,
+        unmeteredOutputTokens: 1_000_000,
+        unmeteredCacheReadTokens: 0,
+        unmeteredCacheCreationTokens: 0,
+      },
+    ];
+    const report = buildReport(metered, MIDNIGHT);
+    expect(report.rows[0].meteredAiu).toBeCloseTo(5);
+    expect(report.rows[0].estimatedAic).toBeCloseTo(300);
+    expect(report.rows[0].aic).toBeCloseTo(305);
+    expect(report.rows[0].estimatedUnpriced).toBe(false); // gpt-test IS in the card
+    expect(report.totals.meteredChats).toBe(2);
+    expect(report.totals.meteredAiu).toBeCloseTo(5);
+    expect(report.unpricedModels).toEqual([]);
+  });
+
+  it('does not flag a fully-metered model that is absent from the rate card', () => {
+    const report = buildReport(
+      [
+        {
+          model: 'mystery',
+          chats: 2,
+          inputTokens: 1000,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          meteredAiu: 1.5,
+          meteredChats: 2,
+          unmeteredInputTokens: 0,
+          unmeteredOutputTokens: 0,
+          unmeteredCacheReadTokens: 0,
+          unmeteredCacheCreationTokens: 0,
+        },
+      ],
+      MIDNIGHT,
+    );
+    expect(report.rows[0].aic).toBeCloseTo(1.5); // metered, even with no rate card
+    expect(report.unpricedModels).toEqual([]);
+  });
 });
 
 describe('formatReport', () => {
-  it('renders a plain-text table with a total and unpriced note', () => {
+  it('renders a plain-text table with a total and un-metered/unpriced note', () => {
     const out = formatReport(buildReport(aggregates, MIDNIGHT), false);
     expect(out).toContain('TOTAL');
     expect(out).toContain('300.00');
     expect(out).toContain('mystery *');
-    expect(out).toContain('unpriced');
+    expect(out).toContain('counted as 0');
   });
 
   it('handles an empty report', () => {

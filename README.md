@@ -3,10 +3,12 @@
 A small CLI that shows your **GitHub Copilot AI credit (AIC) usage for today** — from local
 midnight — broken down per model, with a USD estimate.
 
-It reads the **measured per-span token counts** that VS Code's Copilot Chat extension writes
-to a local OTel SQLite database (`agent-traces.db`) and prices them with a bundled rate card
-(1 AIC = $0.01). Nothing is sent anywhere — prompt/response content is never read, only
-aggregate token counts.
+It reads what VS Code's Copilot Chat extension records in a local OTel SQLite database
+(`agent-traces.db`). For each chat it uses **Copilot's own billed credit value** (the
+`copilot_usage_nano_aiu` attribute — its authoritative AI-Unit figure, 1 AIU ≈ 1 AIC ≈ $0.01),
+and falls back to pricing the per-span token counts with a bundled rate card only for chats
+that lack a stored value. Nothing is sent anywhere — prompt/response content is never read,
+only aggregate usage.
 
 ```
 Copilot AI credit usage — 6/2/2026, 12:30:00 PM
@@ -152,9 +154,14 @@ scheduler is actually firing.
 
 - Measures **VS Code Copilot Chat** usage. The standalone `copilot` CLI does not persist
   token counts locally, so its usage is **not** captured.
-- AIC is plan-invariant and matches GitHub's token-based billing. The figure is an estimate
-  derived from local token counts × a bundled rate card, which may drift from GitHub's
-  current prices.
+- **AIC source.** Each chat is counted from Copilot's own stored credit value
+  (`copilot_usage_nano_aiu`) — the authoritative, billed figure. Only chats missing that value
+  fall back to the rate card; the footer reports the metered/estimated split so you know how
+  much is exact.
+- **Rate-card fallback** prices billable input as `input − cacheRead − cacheCreation` (the
+  recorded `input_tokens` is the *total* prompt, inclusive of cached tokens — not subtracting
+  them overstates cache-heavy sessions several-fold). Card prices can still drift from
+  GitHub's, and models not in the card with no stored value are counted as `0` (marked `*`).
 - The source DB is ephemeral (see above); the durable store is as complete as your run
   cadence. `--no-ingest` bypasses the store and reads the live source only (a lower bound).
 

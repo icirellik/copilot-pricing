@@ -167,10 +167,17 @@ export function getRateCard(modelId: string): RateCard | null {
 
 /**
  * Compute AIC cost for a model invocation. Unknown model → 0.
- * cacheCreation falls back to the input rate when the YAML lacks
- * `cache_write` (OpenAI/Gemini cache implicitly). Rate-card values
- * are already AIC per 1M tokens (converted at load time), so this
- * function emits AIC directly.
+ *
+ * IMPORTANT: Copilot's `input_tokens` (gen_ai.usage.input_tokens) is the TOTAL
+ * prompt size — it already includes the cache-read and cache-creation tokens.
+ * Billable fresh input is therefore `input - cacheRead - cacheCreation`; pricing
+ * the full `input` at the input rate AND adding the cache tokens again would
+ * double-count (it overstated cache-heavy sessions ~4-5x). Verified against
+ * Copilot's own stored `copilot_usage_nano_aiu`.
+ *
+ * cacheCreation falls back to the input rate when the YAML lacks `cache_write`
+ * (OpenAI/Gemini cache implicitly). Rate-card values are already AIC per 1M
+ * tokens (converted at load time), so this function emits AIC directly.
  */
 export function computeCost(modelId: string, tokens: TokenCounts): number {
   const card = getRateCard(modelId);
@@ -178,8 +185,9 @@ export function computeCost(modelId: string, tokens: TokenCounts): number {
     return 0;
   }
   const cacheCreationRate = card.cacheCreation ?? card.input;
+  const freshInput = Math.max(0, tokens.input - tokens.cacheRead - tokens.cacheCreation);
   return (
-    (tokens.input * card.input +
+    (freshInput * card.input +
       tokens.cacheRead * card.cachedInput +
       tokens.cacheCreation * cacheCreationRate +
       tokens.output * card.output) /

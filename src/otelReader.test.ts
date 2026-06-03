@@ -42,11 +42,10 @@ function seedDb(path: string): void {
   // non-chat operation → excluded everywhere
   insSpan.run('s5', 'gpt-test', 500, 500, 0, MIDNIGHT + 4000, 'execute_tool');
 
-  db.prepare('INSERT INTO span_attributes (span_id, key, value) VALUES (?, ?, ?)').run(
-    's1',
-    'gen_ai.usage.cache_creation.input_tokens',
-    '5',
-  );
+  const insAttr = db.prepare('INSERT INTO span_attributes (span_id, key, value) VALUES (?, ?, ?)');
+  insAttr.run('s1', 'gen_ai.usage.cache_creation.input_tokens', '5');
+  // s1 carries Copilot's stored credits (2e9 nano = 2.0 AIU); s2/s3 do not.
+  insAttr.run('s1', 'copilot_chat.copilot_usage_nano_aiu', '2000000000');
   db.close();
 }
 
@@ -87,6 +86,13 @@ describe('OTelReader', () => {
       outputTokens: 70,
       cacheReadTokens: 10,
       cacheCreationTokens: 5,
+      // s1 is metered (2 AIU); s2 is not → un-metered token sums are s2's only.
+      meteredChats: 1,
+      meteredAiu: 2,
+      unmeteredInputTokens: 200,
+      unmeteredOutputTokens: 20,
+      unmeteredCacheReadTokens: 0,
+      unmeteredCacheCreationTokens: 0,
     });
     expect(byModel['claude-test']).toMatchObject({
       chats: 1,
@@ -94,6 +100,9 @@ describe('OTelReader', () => {
       outputTokens: 100,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      meteredChats: 0,
+      meteredAiu: 0,
+      unmeteredInputTokens: 1000,
     });
   });
 
@@ -112,8 +121,14 @@ describe('OTelReader', () => {
 
     const byId = Object.fromEntries(spans.map((s) => [s.spanId, s]));
     expect(Object.keys(byId).sort()).toEqual(['s1', 's2', 's3', 's4']); // chat only, no boundary
-    expect(byId['s1']).toMatchObject({ model: 'gpt-test', inputTokens: 100, cacheReadTokens: 10, cacheCreationTokens: 5 });
-    expect(byId['s2']).toMatchObject({ cacheCreationTokens: 0 });
+    expect(byId['s1']).toMatchObject({
+      model: 'gpt-test',
+      inputTokens: 100,
+      cacheReadTokens: 10,
+      cacheCreationTokens: 5,
+      usageNanoAiu: 2000000000,
+    });
+    expect(byId['s2']).toMatchObject({ cacheCreationTokens: 0, usageNanoAiu: null });
   });
 
   it('readChatSpans honors the optional sinceMs boundary', () => {

@@ -62,20 +62,31 @@ describe('getRateCard', () => {
 });
 
 describe('computeCost', () => {
-  it('prices input/output/cache-read in AIC', () => {
-    // 1M input @200 + 1M output @800 + 1M cacheRead @50 = 1050 AIC
-    const aic = computeCost('Test Model', { input: 1_000_000, output: 1_000_000, cacheRead: 1_000_000, cacheCreation: 0 });
-    expect(aic).toBeCloseTo(1050);
+  it('prices all-fresh input + output in AIC', () => {
+    // 1M fresh input @200 + 1M output @800 = 1000 AIC (no cache)
+    const aic = computeCost('Test Model', { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheCreation: 0 });
+    expect(aic).toBeCloseTo(1000);
   });
 
-  it('falls back to the input rate for cache-creation when cache_write is absent', () => {
-    const aic = computeCost('Test Model', { input: 0, output: 0, cacheRead: 0, cacheCreation: 1_000_000 });
-    expect(aic).toBeCloseTo(200); // uses input rate (200)
+  it('treats input as inclusive of cache (no double-count)', () => {
+    // input is the TOTAL prompt; here ALL of it is cache-read → fresh = 0.
+    // Old (buggy) formula gave 1M@200 + 1M@50 = 250; correct is just 1M cacheRead @50 = 50.
+    const aic = computeCost('Test Model', { input: 1_000_000, output: 0, cacheRead: 1_000_000, cacheCreation: 0 });
+    expect(aic).toBeCloseTo(50);
+  });
+
+  it('subtracts both cache-read and cache-creation from billable input', () => {
+    // input 1M total = 600k cacheRead + 200k cacheCreation + 200k fresh.
+    // (200k·200 + 600k·50 + 200k·200[cache_write absent → input rate]) / 1e6
+    // = (40M + 30M + 40M) / 1e6 = 110 AIC
+    const aic = computeCost('Test Model', { input: 1_000_000, output: 0, cacheRead: 600_000, cacheCreation: 200_000 });
+    expect(aic).toBeCloseTo(110);
   });
 
   it('uses the explicit cache_write rate when present', () => {
-    const aic = computeCost('Claude Test', { input: 0, output: 0, cacheRead: 0, cacheCreation: 1_000_000 });
-    expect(aic).toBeCloseTo(375); // $3.75 → 375 AIC
+    // input == cacheCreation → fresh 0; 1M cache-creation @375 = 375 AIC
+    const aic = computeCost('Claude Test', { input: 1_000_000, output: 0, cacheRead: 0, cacheCreation: 1_000_000 });
+    expect(aic).toBeCloseTo(375);
   });
 
   it('returns 0 for unknown models', () => {
