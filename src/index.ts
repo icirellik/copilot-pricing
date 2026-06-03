@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
+import * as os from 'node:os';
 import { command, flag, optional, option, run, string } from 'cmd-ts';
 import pc from 'picocolors';
 import { listDbCandidates, resolveDbPath } from './dbLocator';
@@ -7,7 +8,16 @@ import { buildReport, formatJson, formatReport, type UsageCoverage } from './for
 import { openUsageStore, resolveStorePath, type UsageStore } from './ingestStore';
 import { errorMessage, log, setDebug } from './logger';
 import { createOTelReader, type OTelReader, type PerModelAggregate } from './otelReader';
+import {
+  defaultLogPath,
+  renderSchedule,
+  resolveTarget,
+  type ScheduleContext,
+  type ScheduleTarget,
+} from './schedule';
 import { loadRateCard } from './tokenRates';
+
+const SCHEDULE_TARGETS = new Set(['auto', 'launchd', 'cron', 'systemd']);
 
 const VERSION = '1.0.0';
 
@@ -75,6 +85,7 @@ interface StoreInfo {
   rows?: number;
   capturedToday?: number;
   earliestTodayMs?: number | null;
+  lastIngestMs?: number | null;
   error?: string;
 }
 
@@ -94,6 +105,7 @@ function inspectStore(storePath: string): StoreInfo {
         rows: store.totalRows(),
         capturedToday: agg.reduce((n, a) => n + a.chats, 0),
         earliestTodayMs: store.earliestEndSince(since) || null,
+        lastIngestMs: store.lastIngestMs() || null,
       };
     } finally {
       store.close();
@@ -179,9 +191,121 @@ function printDoctor(dbPath: string | null, storePath: string, useColor: boolean
     lines.push(
       `  earliest today:   ${storeInfo.earliestTodayMs ? new Date(storeInfo.earliestTodayMs).toLocaleString() : dim('none')}`,
     );
+    lines.push(
+      `  last ingest:      ${storeInfo.lastIngestMs ? new Date(storeInfo.lastIngestMs).toLocaleString() : dim('never')}`,
+    );
   }
 
   process.stdout.write(lines.join('\n') + '\n');
+}
+
+const DEFAULT_INTERVAL_SEC = 60;
+const MIN_INTERVAL_SEC = 5;
+
+function parseIntervalSec(raw?: string): number {
+  const n = raw === undefined ? DEFAULT_INTERVAL_SEC : Number(raw);
+  if (!Number.isFinite(n)) {
+    return DEFAULT_INTERVAL_SEC;
+  }
+  return Math.max(MIN_INTERVAL_SEC, Math.floor(n));
+}
+
+/** Mirror the source's chat spans into the store. null = source unavailable. */
+function runIngest(dbPath: string | null, store: UsageStore, nowMs: number): { seen: number; inserted: number } | null {
+  if (!dbPath || !existsSync(dbPath)) {
+    return null;
+  }
+  const reader = createOTelReader(dbPath);
+  try {
+    if (!reader.isAvailable()) {
+      return null;
+    }
+    return store.ingest(reader.readChatSpans(), nowMs);
+  } finally {
+    reader.close();
+  }
+}
+
+function printIngestSummary(res: { seen: number; inserted: number } | null, store: UsageStore, json: boolean): void {
+  if (json) {
+    process.stdout.write(
+      JSON.stringify({
+        seen: res?.seen ?? 0,
+        inserted: res?.inserted ?? 0,
+        totalRows: store.totalRows(),
+        sourceAvailable: res !== null,
+      }) + '\n',
+    );
+    return;
+  }
+  if (!res) {
+    process.stdout.write('source unavailable — nothing ingested\n');
+    return;
+  }
+  process.stdout.write(`Captured ${res.inserted} new of ${res.seen} chat spans → ${store.path} (total ${store.totalRows()})\n`);
+}
+
+function runWatch(dbPath: string | null, store: UsageStore, intervalSec: number): void {
+  const tick = (): void => {
+    const res = runIngest(dbPath, store, Date.now());
+    const ts = new Date().toLocaleTimeString();
+    if (res) {
+      process.stderr.write(`[${ts}] ingest: ${res.seen} seen, ${res.inserted} new (total ${store.totalRows()})\n`);
+    } else {
+      process.stderr.write(`[${ts}] source unavailable; retrying in ${intervalSec}s\n`);
+    }
+  };
+  process.stderr.write(`watching: ingesting every ${intervalSec}s — Ctrl-C to stop\n`);
+  tick();
+  const timer = setInterval(tick, intervalSec * 1000);
+  process.on('SIGINT', () => {
+    clearInterval(timer);
+    store.close();
+    process.stderr.write('\nstopped.\n');
+    process.exit(0);
+  });
+}
+
+function printSchedule(targetRaw: string, intervalSec: number, storeOpt: string | undefined, dbOpt: string | undefined, utc: boolean): void {
+  if (!SCHEDULE_TARGETS.has(targetRaw)) {
+    process.stderr.write(`Unknown --schedule target "${targetRaw}". Use one of: auto, launchd, cron, systemd.\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const target = resolveTarget(targetRaw as ScheduleTarget);
+
+  const extraArgs: string[] = [];
+  if (storeOpt) {
+    extraArgs.push('--store', storeOpt);
+  }
+  if (dbOpt) {
+    extraArgs.push('--db', dbOpt);
+  }
+  if (utc) {
+    extraArgs.push('--utc');
+  }
+
+  let scriptPath = process.argv[1] ?? '';
+  try {
+    scriptPath = realpathSync(scriptPath);
+  } catch {
+    // fall back to the raw argv path
+  }
+
+  const ctx: ScheduleContext = {
+    nodePath: process.execPath,
+    scriptPath,
+    intervalSec,
+    extraArgs,
+    logPath: defaultLogPath(),
+    home: os.homedir(),
+  };
+  const { unit, hints } = renderSchedule(target, ctx);
+  process.stdout.write(unit);
+  process.stderr.write(`\n# ${target}: this only prints — copilot-price installs nothing.\n`);
+  for (const h of hints) {
+    process.stderr.write(`# ${h}\n`);
+  }
 }
 
 const cmd = command({
@@ -194,17 +318,59 @@ const cmd = command({
     store: option({ long: 'store', type: optional(string), description: 'Path to the durable usage store (overrides default).' }),
     utc: flag({ long: 'utc', description: 'Use UTC midnight instead of local midnight.' }),
     noIngest: flag({ long: 'no-ingest', description: 'Read the live source only; skip the durable store.' }),
+    ingestOnly: flag({ long: 'ingest-only', description: 'Mirror new spans into the durable store and exit (for schedulers).' }),
+    watch: flag({ long: 'watch', description: 'Continuously ingest on an interval until interrupted (installs nothing).' }),
+    interval: option({
+      long: 'interval',
+      type: optional(string),
+      description: 'Ingest cadence in seconds for --watch / --schedule (default 60).',
+    }),
+    schedule: option({
+      long: 'schedule',
+      type: optional(string),
+      description: 'Print a scheduler unit (auto|launchd|cron|systemd) and exit; installs nothing.',
+    }),
     doctor: flag({ long: 'doctor', description: 'Diagnose database detection, the durable store, and recorded usage.' }),
     debug: flag({ long: 'debug', description: 'Print debug logging to stderr.' }),
     noColor: flag({ long: 'no-color', description: 'Disable colored output.' }),
   },
-  handler: ({ json, db, store: storeOpt, utc, noIngest, doctor, debug, noColor }) => {
+  handler: ({ json, db, store: storeOpt, utc, noIngest, ingestOnly, watch, interval, schedule, doctor, debug, noColor }) => {
     setDebug(debug);
     const useColor = shouldColor(noColor);
     const dbPath = resolveDbPath(db);
 
+    if (schedule !== undefined) {
+      printSchedule(schedule, parseIntervalSec(interval), storeOpt, db, utc);
+      return;
+    }
+
     if (doctor) {
       printDoctor(dbPath, resolveStorePath(storeOpt), useColor, json);
+      return;
+    }
+
+    // Automation modes: mirror spans into the store without rendering a report.
+    if (watch || ingestOnly) {
+      if (noIngest) {
+        process.stderr.write('--watch/--ingest-only cannot be combined with --no-ingest.\n');
+        process.exitCode = 1;
+        return;
+      }
+      let store: UsageStore;
+      try {
+        store = openUsageStore(resolveStorePath(storeOpt));
+      } catch (e) {
+        process.stderr.write('could not open durable store: ' + errorMessage(e) + '\n');
+        process.exitCode = 1;
+        return;
+      }
+      if (watch) {
+        runWatch(dbPath, store, parseIntervalSec(interval));
+        return; // the interval loop owns the process lifetime
+      }
+      const res = runIngest(dbPath, store, Date.now());
+      printIngestSummary(res, store, json);
+      store.close();
       return;
     }
 

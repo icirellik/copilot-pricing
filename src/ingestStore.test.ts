@@ -100,6 +100,14 @@ describe('UsageStore', () => {
     expect(store.ingest([], NOW)).toEqual({ seen: 0, inserted: 0 });
     expect(store.totalRows()).toBe(0);
   });
+
+  it('records the last ingest time, even on a no-op ingest', () => {
+    expect(store.lastIngestMs()).toBe(0);
+    store.ingest([span({ spanId: 'a' })], NOW);
+    expect(store.lastIngestMs()).toBe(NOW);
+    store.ingest([], NOW + 5000);
+    expect(store.lastIngestMs()).toBe(NOW + 5000);
+  });
 });
 
 describe('resolveStorePath', () => {

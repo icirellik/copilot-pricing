@@ -68,6 +68,8 @@ export interface UsageStore {
   aggregateSince(sinceMs: number): PerModelAggregate[];
   earliestEndSince(sinceMs: number): number;
   totalRows(): number;
+  /** Epoch ms of the last ingest (0 if never) — for doctor/coverage recency. */
+  lastIngestMs(): number;
   readonly path: string;
   close(): void;
 }
@@ -91,7 +93,11 @@ class UsageStoreImpl implements UsageStore {
     fs.mkdirSync(path.dirname(storePath), { recursive: true });
     this.db = new DatabaseSyncCtor(storePath);
     try {
-      this.db.exec('PRAGMA busy_timeout = 3000');
+      // WAL + a generous busy_timeout is the whole concurrency story: a
+      // scheduled `--ingest-only` can overlap a manual run, but WAL allows one
+      // writer at a time and busy_timeout makes the loser wait rather than
+      // throw. Transactions here are tiny, so the wait is brief.
+      this.db.exec('PRAGMA busy_timeout = 5000');
       this.db.exec('PRAGMA journal_mode = WAL');
     } catch {
       // non-fatal; defaults still work
@@ -102,39 +108,56 @@ class UsageStoreImpl implements UsageStore {
   }
 
   ingest(spans: RawChatSpan[], nowMs: number): IngestResult {
-    if (spans.length === 0) {
-      return { seen: 0, inserted: 0 };
-    }
     const before = this.totalRows();
-    const stmt = this.db.prepare(UPSERT_SQL);
-    this.db.exec('BEGIN');
-    try {
-      for (const s of spans) {
-        stmt.run(
-          s.spanId,
-          s.model,
-          s.startTimeMs,
-          s.endTimeMs,
-          s.inputTokens,
-          s.outputTokens,
-          s.cacheReadTokens,
-          s.cacheCreationTokens,
-          s.chatSessionId,
-          s.conversationId,
-          nowMs,
-          nowMs,
-        );
-      }
-      this.db.exec('COMMIT');
-    } catch (err) {
+    if (spans.length > 0) {
+      const stmt = this.db.prepare(UPSERT_SQL);
+      this.db.exec('BEGIN');
       try {
-        this.db.exec('ROLLBACK');
-      } catch {
-        // ignore
+        for (const s of spans) {
+          stmt.run(
+            s.spanId,
+            s.model,
+            s.startTimeMs,
+            s.endTimeMs,
+            s.inputTokens,
+            s.outputTokens,
+            s.cacheReadTokens,
+            s.cacheCreationTokens,
+            s.chatSessionId,
+            s.conversationId,
+            nowMs,
+            nowMs,
+          );
+        }
+        this.db.exec('COMMIT');
+      } catch (err) {
+        try {
+          this.db.exec('ROLLBACK');
+        } catch {
+          // ignore
+        }
+        throw err;
       }
-      throw err;
     }
+    // Record recency even on a no-op ingest, so doctor can show "last capture".
+    this.setMeta('last_ingest_ms', String(nowMs));
     return { seen: spans.length, inserted: this.totalRows() - before };
+  }
+
+  private setMeta(key: string, value: string): void {
+    this.db
+      .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(key, value);
+  }
+
+  private getMeta(key: string): string | null {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
+    return row ? row.value : null;
+  }
+
+  lastIngestMs(): number {
+    const v = this.getMeta('last_ingest_ms');
+    return v ? toInt(Number(v)) : 0;
   }
 
   aggregateSince(sinceMs: number): PerModelAggregate[] {

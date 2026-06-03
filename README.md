@@ -85,6 +85,11 @@ copilot-price --db <path> # point at a specific agent-traces.db
 copilot-price --store <p> # point at a specific durable store
 copilot-price --no-ingest # read the live source only; don't read/write the durable store
 copilot-price --no-color  # plain output
+
+# continuous capture (see below)
+copilot-price --ingest-only        # mirror new spans into the store and exit
+copilot-price --watch [--interval N]  # ingest every N seconds until Ctrl-C
+copilot-price --schedule <target>  # print a launchd/cron/systemd unit (installs nothing)
 ```
 
 The source DB is auto-detected across VS Code variants; override with `--db` or the
@@ -108,6 +113,40 @@ so totals only ever grow. Reporting is done from this store.
 - It can only capture what's present *when it runs*. Usage that was pruned **before** the first
   capture is gone — so run `copilot-price` regularly (or on a schedule) to avoid morning gaps.
   The tool warns when the earliest usage it can account for today starts well after midnight.
+
+## Continuous capture (optional)
+
+To close the *between-runs* gap, keep the store fed in the background. `copilot-price`
+**installs nothing** — it just gives you commands and prints scheduler recipes you install
+yourself.
+
+```bash
+copilot-price --ingest-only          # mirror new spans into the store and exit (for schedulers)
+copilot-price --watch                # foreground loop: ingest every 60s until Ctrl-C
+copilot-price --watch --interval 30  # finer cadence
+```
+
+`--watch` is the zero-setup option: run it in a terminal/tmux, or add it as a macOS *Login
+Item* to persist across logins. Nothing is written to OS scheduler locations.
+
+For OS-level scheduling, print a ready-to-install unit (paths resolved for you) and install it
+**yourself**:
+
+```bash
+# macOS LaunchAgent (runs --ingest-only every 60s):
+copilot-price --schedule launchd > ~/Library/LaunchAgents/com.icirellik.copilot-price.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.icirellik.copilot-price.plist
+
+# crontab line (1-minute granularity):
+copilot-price --schedule cron        # prints the line; add it with `crontab -e`
+
+# Linux systemd --user service + timer:
+copilot-price --schedule systemd     # prints both units + enable hints
+```
+
+`--schedule` only prints (unit → stdout, install/uninstall hints → stderr); it never installs
+or runs anything. `--doctor` shows the store's **last ingest** time so you can confirm a
+scheduler is actually firing.
 
 ## Scope & accuracy
 
