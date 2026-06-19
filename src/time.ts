@@ -29,6 +29,18 @@ export function midnightDaysAgo(dayOffset: number, utc: boolean): number {
   return d.getTime();
 }
 
+/** Epoch ms of the first day of the current month at midnight (local or UTC). */
+export function monthStartMs(utc: boolean): number {
+  const now = new Date();
+  if (utc) {
+    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+  }
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(1);
+  return d.getTime();
+}
+
 /** The YYYY-MM-DD calendar date of an epoch ms, read in local (or UTC) tz. */
 export function isoDate(ms: number, utc: boolean): string {
   const d = new Date(ms);

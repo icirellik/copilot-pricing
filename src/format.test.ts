@@ -107,6 +107,22 @@ describe('formatReport', () => {
     const out = formatReport(buildReport([], MIDNIGHT), false);
     expect(out).toContain('No Copilot chat usage');
   });
+
+  it('renders a month-to-date headline when present', () => {
+    const report = buildReport(aggregates, MIDNIGHT);
+    report.monthToDate = { sinceMs: MIDNIGHT, aic: 1234.56, usd: 12.3456 };
+    const out = formatReport(report, false);
+    expect(out).toContain('Month to date: 1234.56 AIC');
+    expect(out).toContain('$12.35');
+  });
+
+  it('shows month-to-date even when today is empty', () => {
+    const report = buildReport([], MIDNIGHT);
+    report.monthToDate = { sinceMs: MIDNIGHT, aic: 42, usd: 0.42 };
+    const out = formatReport(report, false);
+    expect(out).toContain('No Copilot chat usage');
+    expect(out).toContain('Month to date: 42.00 AIC');
+  });
 });
 
 describe('formatJson', () => {

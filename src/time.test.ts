@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isoDate, midnightDaysAgo, midnightMs } from './time';
+import { isoDate, midnightDaysAgo, midnightMs, monthStartMs } from './time';
 
 describe('midnightMs', () => {
   it('returns a midnight boundary (local) that isoDate reads back to today', () => {
@@ -27,6 +27,22 @@ describe('isoDate', () => {
 
   it('zero-pads single-digit months and days', () => {
     expect(isoDate(Date.UTC(2026, 0, 3, 12), true)).toBe('2026-01-03');
+  });
+});
+
+describe('monthStartMs', () => {
+  it('is the first of the month at midnight, not after today', () => {
+    const start = monthStartMs(false);
+    const d = new Date(start);
+    expect(d.getDate()).toBe(1);
+    expect(d.getHours()).toBe(0);
+    expect(start).toBeLessThanOrEqual(midnightMs(false));
+  });
+
+  it('UTC variant lands on the 1st in UTC', () => {
+    const d = new Date(monthStartMs(true));
+    expect(d.getUTCDate()).toBe(1);
+    expect(d.getUTCHours()).toBe(0);
   });
 });
 

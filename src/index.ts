@@ -33,7 +33,7 @@ import {
   type ScheduleContext,
   type ScheduleTarget,
 } from './schedule';
-import { isoDate, midnightDaysAgo, midnightMs } from './time';
+import { isoDate, midnightDaysAgo, midnightMs, monthStartMs } from './time';
 import { loadRateCard } from './tokenRates';
 
 const SCHEDULE_TARGETS = new Set(['auto', 'launchd', 'cron', 'systemd']);
@@ -794,6 +794,14 @@ const cmd = command({
       }
 
       const report = buildReport(aggregates, since, coverage);
+      // Month-to-date headline, from the durable store only (the live source is
+      // pruned and can't cover a whole month). aggregateSince(monthStart) is
+      // month-to-date since there are no future spans.
+      if (store) {
+        const monthStart = monthStartMs(utc);
+        const monthAic = buildReport(store.aggregateSince(monthStart), monthStart).totals.aic;
+        report.monthToDate = { sinceMs: monthStart, aic: monthAic, usd: monthAic / 100 };
+      }
       process.stdout.write(json ? formatJson(report) + '\n' : formatReport(report, useColor));
     } finally {
       sourceReader?.close();

@@ -55,6 +55,8 @@ export interface UsageReport {
   /** Models with un-metered chats and no rate-card match (counted as 0). */
   unpricedModels: string[];
   coverage?: UsageCoverage;
+  /** Month-to-date totals from the durable store (omitted when unavailable). */
+  monthToDate?: { sinceMs: number; aic: number; usd: number };
 }
 
 // If the earliest usage we can account for today starts more than this long
@@ -182,7 +184,8 @@ export function formatReport(report: UsageReport, useColor = true): string {
   const header = c.bold('Copilot AI credit usage') + c.dim(` — since ${localSince}`);
 
   if (report.rows.length === 0) {
-    return `${header}\n\n${c.dim('No Copilot chat usage recorded yet today.')}\n`;
+    const base = `${header}\n\n${c.dim('No Copilot chat usage recorded yet today.')}\n`;
+    return report.monthToDate && report.monthToDate.aic > 0 ? base + monthLine(report.monthToDate, c) + '\n' : base;
   }
 
   // Totals row reuses the same column formatting.
@@ -230,6 +233,9 @@ export function formatReport(report: UsageReport, useColor = true): string {
   lines.push(
     c.bold(`Total: ${aic(report.totals.aic)} AIC`) + c.dim(`  (≈ ${usd(report.totals.usd)}, ${num(report.totals.tokens)} tokens)`),
   );
+  if (report.monthToDate) {
+    lines.push(monthLine(report.monthToDate, c));
+  }
   lines.push(sourceNote(report, c));
   if (report.unpricedModels.length > 0) {
     lines.push(c.yellow(`* un-metered chats for a model not in the rate card — counted as 0: ${report.unpricedModels.join(', ')}`));
@@ -238,6 +244,11 @@ export function formatReport(report: UsageReport, useColor = true): string {
     lines.push(notice);
   }
   return lines.join('\n') + '\n';
+}
+
+/** Month-to-date headline (durable store only). */
+function monthLine(m: { sinceMs: number; aic: number; usd: number }, c: typeof pc): string {
+  return c.bold(`Month to date: ${aic(m.aic)} AIC`) + c.dim(`  (≈ ${usd(m.usd)})`);
 }
 
 /** One-line explanation of where the AIC came from (metered vs estimated). */
