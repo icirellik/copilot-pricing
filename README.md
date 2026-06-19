@@ -91,6 +91,12 @@ copilot-price --no-color  # plain output
 copilot-price --ingest-only        # mirror new spans into the store and exit
 copilot-price --watch [--interval N]  # ingest every N seconds until Ctrl-C
 copilot-price --schedule <target>  # print a launchd/cron/systemd unit (installs nothing)
+
+# compete with friends (see below)
+copilot-price --join <code> --handle <you>   # join a league
+copilot-price --publish            # publish today's total, then show the board
+copilot-price --leaderboard [--week|--all-time]   # show the ranked board
+copilot-price --backfill <N>       # publish the last N days from your local store
 ```
 
 The source DB is auto-detected across VS Code variants (stable, Insiders, Cursor, VSCodium);
@@ -149,6 +155,62 @@ copilot-price --schedule systemd     # prints both units + enable hints
 `--schedule` only prints (unit → stdout, install/uninstall hints → stderr); it never installs
 or runs anything. `--doctor` shows the store's **last ingest** time so you can confirm a
 scheduler is actually firing.
+
+## Compete with friends (leaderboard)
+
+Add your friends to a shared **league** and race on daily AI-credit usage. Each `--publish`
+sends **only** `{ league, handle, date, totalAic }` — your handle, the date, and the single
+day total. No per-model data, no token counts, and (as always) no prompt or response content
+ever leaves your machine.
+
+It needs a tiny backend the group deploys **once** — a Cloudflare Worker + D1, under
+[`server/`](server/README.md). The CLI itself still installs nothing and talks to the backend
+over plain HTTPS, so any host implementing the same contract works.
+
+```bash
+# 1. One person deploys the backend (see server/README.md), then mints a join code:
+copilot-price --make-league-code \
+  --api https://copilot-price-league.<subdomain>.workers.dev \
+  --token <the shared LEAGUE_SECRET> --league friends
+#   → prints a code to share privately (it contains the secret — treat it like a password)
+
+# 2. Everyone joins once:
+copilot-price --join <code> --handle dana
+
+# 3. Publish today's total (also prints the board so you see your rank):
+copilot-price --publish
+
+# 4. Check the boards any time:
+copilot-price --leaderboard            # today
+copilot-price --leaderboard --week     # last 7 days
+copilot-price --leaderboard --all-time # cumulative
+```
+
+```
+Copilot league — today  (friends)
+
+🥇  dana          142.70 AIC
+🥈  cam (you)      98.30 AIC
+🥉  alex           61.00 AIC
+```
+
+- **Boards.** Today resets at your local midnight (`--utc` to use UTC); week and all-time
+  accumulate from the daily snapshots the backend keeps. Ranked by AIC.
+- **Keep it fresh automatically.** Add `--publish` to your background ingest so the board
+  updates hands-free: `copilot-price --watch --publish`, or append `--publish` to the
+  `--ingest-only` line in your scheduler unit. Publishing is best-effort — a network hiccup
+  never stalls or fails the underlying ingest.
+- **Backfill.** Only ran the tool sporadically? `copilot-price --backfill 14` republishes the
+  last 14 days from your durable local store (which keeps every span), so week/all-time catch
+  up. Re-running is idempotent.
+- **See exactly what's sent.** `copilot-price --publish --dry-run` prints the precise JSON
+  payload and sends nothing.
+- **Config.** Your league lives in `~/.copilot-price/league.json` (mode `0600`, it holds the
+  shared secret) — override with `COPILOT_PRICE_LEAGUE`, or relocate the dir with
+  `COPILOT_PRICE_HOME`.
+- **Trust model.** This is built for friends, not adversaries: anyone with the league token can
+  publish under any handle and read the whole board. Pick a unique handle; run separate Workers
+  for separate groups. See [`server/README.md`](server/README.md) for the details.
 
 ## Scope & accuracy
 

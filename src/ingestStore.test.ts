@@ -84,6 +84,22 @@ describe('UsageStore', () => {
     expect(agg[0]).toMatchObject({ chats: 1, cacheCreationTokens: 42 });
   });
 
+  it('aggregateBetween bounds to a half-open (start, end] window', () => {
+    store.ingest(
+      [
+        span({ spanId: 'lo', endTimeMs: MIDNIGHT + 1000 }), // == start, excluded (strict >)
+        span({ spanId: 'a', endTimeMs: MIDNIGHT + 2000 }), // inside
+        span({ spanId: 'b', endTimeMs: MIDNIGHT + 3000 }), // inside
+        span({ spanId: 'hi', endTimeMs: MIDNIGHT + 4000 }), // == end, included (<=)
+        span({ spanId: 'over', endTimeMs: MIDNIGHT + 5000 }), // after end, excluded
+      ],
+      NOW,
+    );
+    const agg = store.aggregateBetween(MIDNIGHT + 1000, MIDNIGHT + 4000);
+    expect(agg).toHaveLength(1);
+    expect(agg[0].chats).toBe(3); // a, b, hi
+  });
+
   it('earliestEndSince returns the min end past the boundary', () => {
     store.ingest(
       [

@@ -37,5 +37,6 @@ export default tseslint.config(
       },
     },
   },
-  { ignores: ['**/dist/*'] },
+  // server/ is a separate sub-project (Cloudflare Workers runtime, own tsconfig).
+  { ignores: ['**/dist/*', 'server/**'] },
 );

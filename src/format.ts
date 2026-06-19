@@ -289,7 +289,7 @@ export function formatJson(report: UsageReport): string {
 }
 
 // A no-op picocolors shim so --no-color / non-TTY output is plain.
-function noColor(): typeof pc {
+export function noColor(): typeof pc {
   const identity = (s: string | number) => String(s);
   return new Proxy({} as typeof pc, {
     get: (_t, prop) => (prop === 'isColorSupported' ? false : identity),

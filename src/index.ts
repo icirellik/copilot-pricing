@@ -9,28 +9,36 @@ import { openUsageStore, resolveStorePath, type UsageStore } from './ingestStore
 import { errorMessage, log, setDebug } from './logger';
 import { createOTelReader, type OTelReader, type PerModelAggregate } from './otelReader';
 import {
+  decodeJoinCode,
+  defaultHandle,
+  encodeJoinCode,
+  loadLeague,
+  resolveLeaguePath,
+  saveLeague,
+  type LeagueConfig,
+} from './league';
+import {
+  fetchLeaderboard,
+  LeagueError,
+  publish,
+  publishBatch,
+  type DayTotal,
+  type LeaderboardWindow,
+} from './leagueClient';
+import { renderLeaderboard } from './leagueFormat';
+import {
   defaultLogPath,
   renderSchedule,
   resolveTarget,
   type ScheduleContext,
   type ScheduleTarget,
 } from './schedule';
+import { isoDate, midnightDaysAgo, midnightMs } from './time';
 import { loadRateCard } from './tokenRates';
 
 const SCHEDULE_TARGETS = new Set(['auto', 'launchd', 'cron', 'systemd']);
 
 const VERSION = '1.0.0';
-
-/** Epoch ms of the most recent midnight (local by default, or UTC). */
-function midnightMs(utc: boolean): number {
-  const now = new Date();
-  if (utc) {
-    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  }
-  const d = new Date(now);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
 
 function shouldColor(noColor: boolean): boolean {
   return !noColor && !!process.stdout.isTTY && pc.isColorSupported;
@@ -245,7 +253,12 @@ function printIngestSummary(res: { seen: number; inserted: number } | null, stor
   process.stdout.write(`Captured ${res.inserted} new of ${res.seen} chat spans → ${store.path} (total ${store.totalRows()})\n`);
 }
 
-function runWatch(dbPath: string | null, store: UsageStore, intervalSec: number): void {
+function runWatch(
+  dbPath: string | null,
+  store: UsageStore,
+  intervalSec: number,
+  pubCtx: { cfg: LeagueConfig; utc: boolean } | null,
+): void {
   const tick = (): void => {
     const res = runIngest(dbPath, store, Date.now());
     const ts = new Date().toLocaleTimeString();
@@ -254,8 +267,16 @@ function runWatch(dbPath: string | null, store: UsageStore, intervalSec: number)
     } else {
       process.stderr.write(`[${ts}] source unavailable; retrying in ${intervalSec}s\n`);
     }
+    // Best-effort publish AFTER ingest — fire-and-forget so a slow/failed network
+    // call can never stall or abort the ingest loop. `date` is recomputed inside
+    // (via the current time) so a midnight rollover starts a fresh day's row.
+    if (pubCtx) {
+      void publishTodayBestEffort(pubCtx.cfg, store, pubCtx.utc);
+    }
   };
-  process.stderr.write(`watching: ingesting every ${intervalSec}s — Ctrl-C to stop\n`);
+  process.stderr.write(
+    `watching: ingesting every ${intervalSec}s${pubCtx ? ' and publishing to the league' : ''} — Ctrl-C to stop\n`,
+  );
   tick();
   const timer = setInterval(tick, intervalSec * 1000);
   process.on('SIGINT', () => {
@@ -308,6 +329,237 @@ function printSchedule(targetRaw: string, intervalSec: number, storeOpt: string 
   }
 }
 
+// --- League (friends leaderboard) --------------------------------------------
+
+/** Load the saved league config, or print a friendly error and return null. */
+function requireLeague(): LeagueConfig | null {
+  let cfg: LeagueConfig | null;
+  try {
+    cfg = loadLeague(resolveLeaguePath());
+  } catch (e) {
+    process.stderr.write('copilot-price: ' + errorMessage(e) + '\n');
+    process.exitCode = 1;
+    return null;
+  }
+  if (!cfg) {
+    process.stderr.write(
+      "copilot-price: you haven't joined a league yet. Run: copilot-price --join <code> --handle <you>\n",
+    );
+    process.exitCode = 1;
+    return null;
+  }
+  return cfg;
+}
+
+/** Load league config without failing — for the watch/ingest publish side-effect. */
+function loadLeagueQuiet(): LeagueConfig | null {
+  try {
+    return loadLeague(resolveLeaguePath());
+  } catch (e) {
+    log('league config unreadable: ' + errorMessage(e));
+    return null;
+  }
+}
+
+function reportLeagueError(e: unknown): void {
+  process.stderr.write('copilot-price: ' + (e instanceof LeagueError ? e.message : errorMessage(e)) + '\n');
+  process.exitCode = 1;
+}
+
+/** Today's publishable total from the store. Assumes the rate card is loaded. */
+function todayEntry(store: UsageStore, utc: boolean): DayTotal {
+  const since = midnightMs(utc);
+  return { date: isoDate(since, utc), totalAic: buildReport(store.aggregateSince(since), since).totals.aic };
+}
+
+/** Compute, then publish today's total; errors are swallowed (best-effort). */
+function publishTodayBestEffort(cfg: LeagueConfig, store: UsageStore, utc: boolean): Promise<void> {
+  let entry: DayTotal;
+  try {
+    entry = todayEntry(store, utc);
+  } catch (e) {
+    log('publish prep failed: ' + errorMessage(e));
+    return Promise.resolve();
+  }
+  return publish(cfg, entry).catch((e) => log('publish failed: ' + errorMessage(e)));
+}
+
+function runMakeLeagueCode(api: string | undefined, token: string | undefined, league: string | undefined): void {
+  if (!api || !token || !league) {
+    process.stderr.write('copilot-price: --make-league-code needs --api, --token, and --league.\n');
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(encodeJoinCode({ apiUrl: api, token, league }) + '\n');
+  process.stderr.write('# Share this code privately — it contains your league secret (treat it like a password).\n');
+  process.stderr.write('# Friends run: copilot-price --join <code> --handle <name>\n');
+}
+
+function runJoin(code: string, handleOpt: string | undefined): void {
+  let payload;
+  try {
+    payload = decodeJoinCode(code);
+  } catch (e) {
+    process.stderr.write('copilot-price: ' + errorMessage(e) + '\n');
+    process.exitCode = 1;
+    return;
+  }
+  const handle = (handleOpt ?? defaultHandle()).trim();
+  if (!handle) {
+    process.stderr.write('copilot-price: provide --handle <name> (your name on the board).\n');
+    process.exitCode = 1;
+    return;
+  }
+  const cfg: LeagueConfig = { ...payload, handle };
+  saveLeague(resolveLeaguePath(), cfg);
+  process.stdout.write(
+    `Joined league '${cfg.league}' as ${handle}.\n` +
+      "Run `copilot-price --publish` to post today's usage, or `copilot-price --leaderboard` to see the board.\n",
+  );
+}
+
+async function runLeaderboard(
+  cfg: LeagueConfig,
+  window: LeaderboardWindow,
+  utc: boolean,
+  json: boolean,
+  useColor: boolean,
+): Promise<void> {
+  const date = isoDate(midnightMs(utc), utc);
+  const from = isoDate(midnightDaysAgo(6, utc), utc);
+  try {
+    const result = await fetchLeaderboard(cfg, { window, date, from });
+    if (json) {
+      process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    } else {
+      process.stdout.write(renderLeaderboard(result, { self: cfg.handle, league: cfg.league, useColor }));
+    }
+  } catch (e) {
+    reportLeagueError(e);
+  }
+}
+
+/** Open the store for a manual publish/backfill, or print an error and return null. */
+function openStoreForPublish(storeOpt: string | undefined): UsageStore | null {
+  try {
+    return openUsageStore(resolveStorePath(storeOpt));
+  } catch (e) {
+    process.stderr.write('copilot-price: could not open durable store: ' + errorMessage(e) + '\n');
+    process.exitCode = 1;
+    return null;
+  }
+}
+
+async function runPublish(
+  cfg: LeagueConfig,
+  dbPath: string | null,
+  storeOpt: string | undefined,
+  utc: boolean,
+  dryRun: boolean,
+  json: boolean,
+  useColor: boolean,
+): Promise<void> {
+  loadRateCard();
+  const store = openStoreForPublish(storeOpt);
+  if (!store) {
+    return;
+  }
+  try {
+    runIngest(dbPath, store, Date.now()); // best-effort capture of the latest spans
+    const entry = todayEntry(store, utc);
+
+    if (dryRun) {
+      process.stdout.write(JSON.stringify({ league: cfg.league, handle: cfg.handle, ...entry }, null, 2) + '\n');
+      process.stderr.write('# --dry-run: nothing was sent.\n');
+      return;
+    }
+
+    try {
+      await publish(cfg, entry);
+    } catch (e) {
+      reportLeagueError(e);
+      return;
+    }
+
+    // Publish succeeded — show today's board so you see your rank.
+    try {
+      const result = await fetchLeaderboard(cfg, {
+        window: 'today',
+        date: entry.date,
+        from: isoDate(midnightDaysAgo(6, utc), utc),
+      });
+      if (json) {
+        process.stdout.write(JSON.stringify({ published: entry, leaderboard: result }, null, 2) + '\n');
+      } else {
+        process.stdout.write(`Published ${entry.totalAic.toFixed(2)} AIC for ${entry.date}.\n\n`);
+        process.stdout.write(renderLeaderboard(result, { self: cfg.handle, league: cfg.league, useColor }));
+      }
+    } catch (e) {
+      if (json) {
+        process.stdout.write(JSON.stringify({ published: entry }, null, 2) + '\n');
+      } else {
+        process.stdout.write(`Published ${entry.totalAic.toFixed(2)} AIC for ${entry.date}.\n`);
+      }
+      log('post-publish leaderboard fetch failed: ' + errorMessage(e));
+    }
+  } finally {
+    store.close();
+  }
+}
+
+async function runBackfill(
+  cfg: LeagueConfig,
+  nRaw: string,
+  dbPath: string | null,
+  storeOpt: string | undefined,
+  utc: boolean,
+  dryRun: boolean,
+  json: boolean,
+): Promise<void> {
+  loadRateCard();
+  const parsed = Number(nRaw);
+  const n = Math.max(1, Math.min(90, Number.isFinite(parsed) ? Math.floor(parsed) : 7));
+  const store = openStoreForPublish(storeOpt);
+  if (!store) {
+    return;
+  }
+  try {
+    runIngest(dbPath, store, Date.now());
+    const days: DayTotal[] = [];
+    for (let i = 0; i < n; i++) {
+      const dayStart = midnightDaysAgo(i, utc);
+      const report = buildReport(store.aggregateBetween(dayStart, midnightDaysAgo(i - 1, utc)), dayStart);
+      if (report.totals.chats > 0) {
+        days.push({ date: isoDate(dayStart, utc), totalAic: report.totals.aic });
+      }
+    }
+
+    if (days.length === 0) {
+      process.stdout.write(`Nothing to backfill — no captured usage in the last ${n} day(s).\n`);
+      return;
+    }
+    if (dryRun) {
+      process.stdout.write(JSON.stringify({ league: cfg.league, handle: cfg.handle, days }, null, 2) + '\n');
+      process.stderr.write('# --dry-run: nothing was sent.\n');
+      return;
+    }
+
+    try {
+      await publishBatch(cfg, days);
+    } catch (e) {
+      reportLeagueError(e);
+      return;
+    }
+    if (json) {
+      process.stdout.write(JSON.stringify({ backfilled: days }, null, 2) + '\n');
+    } else {
+      process.stdout.write(`Backfilled ${days.length} day(s) to league '${cfg.league}'.\n`);
+    }
+  } finally {
+    store.close();
+  }
+}
+
 const cmd = command({
   name: 'copilot-price',
   version: VERSION,
@@ -333,8 +585,47 @@ const cmd = command({
     doctor: flag({ long: 'doctor', description: 'Diagnose database detection, the durable store, and recorded usage.' }),
     debug: flag({ long: 'debug', description: 'Print debug logging to stderr.' }),
     noColor: flag({ long: 'no-color', description: 'Disable colored output.' }),
+    // League (friends leaderboard).
+    makeLeagueCode: flag({ long: 'make-league-code', description: 'Print a shareable league join code from --api/--token/--league.' }),
+    api: option({ long: 'api', type: optional(string), description: 'League backend base URL (with --make-league-code).' }),
+    token: option({ long: 'token', type: optional(string), description: 'Shared league secret (with --make-league-code).' }),
+    league: option({ long: 'league', type: optional(string), description: 'League namespace (with --make-league-code).' }),
+    join: option({ long: 'join', type: optional(string), description: 'Join a league from a code (pair with --handle).' }),
+    handle: option({ long: 'handle', type: optional(string), description: 'Your name on the leaderboard (with --join).' }),
+    publish: flag({ long: 'publish', description: "Publish today's total to the league (also works with --watch/--ingest-only)." }),
+    backfill: option({ long: 'backfill', type: optional(string), description: 'Publish the last N days from the local store (≤90).' }),
+    leaderboard: flag({ long: 'leaderboard', description: 'Show the league leaderboard (default today; see --week/--all-time).' }),
+    week: flag({ long: 'week', description: 'With --leaderboard: show the this-week board.' }),
+    allTime: flag({ long: 'all-time', description: 'With --leaderboard: show the all-time board.' }),
+    dryRun: flag({ long: 'dry-run', description: 'With --publish/--backfill: print the exact payload and send nothing.' }),
   },
-  handler: ({ json, db, store: storeOpt, utc, noIngest, ingestOnly, watch, interval, schedule, doctor, debug, noColor }) => {
+  handler: async (args) => {
+    const {
+      json,
+      db,
+      store: storeOpt,
+      utc,
+      noIngest,
+      ingestOnly,
+      watch,
+      interval,
+      schedule,
+      doctor,
+      debug,
+      noColor,
+      makeLeagueCode,
+      api,
+      token,
+      league,
+      join,
+      handle,
+      publish: publishFlag,
+      backfill,
+      leaderboard,
+      week,
+      allTime,
+      dryRun,
+    } = args;
     setDebug(debug);
     const useColor = shouldColor(noColor);
     const dbPath = resolveDbPath(db);
@@ -346,6 +637,53 @@ const cmd = command({
 
     if (doctor) {
       printDoctor(dbPath, resolveStorePath(storeOpt), useColor, json);
+      return;
+    }
+
+    // --- League modes (each is terminal) ---
+    if (makeLeagueCode) {
+      runMakeLeagueCode(api, token, league);
+      return;
+    }
+    if (join !== undefined) {
+      runJoin(join, handle);
+      return;
+    }
+    if (backfill !== undefined && !watch && !ingestOnly) {
+      if (noIngest) {
+        process.stderr.write('copilot-price: --backfill reads the durable store; drop --no-ingest.\n');
+        process.exitCode = 1;
+        return;
+      }
+      const cfg = requireLeague();
+      if (cfg) {
+        await runBackfill(cfg, backfill, dbPath, storeOpt, utc, dryRun, json);
+      }
+      return;
+    }
+    if (publishFlag && !watch && !ingestOnly) {
+      if (noIngest) {
+        process.stderr.write('copilot-price: --publish reads the durable store; drop --no-ingest.\n');
+        process.exitCode = 1;
+        return;
+      }
+      const cfg = requireLeague();
+      if (cfg) {
+        await runPublish(cfg, dbPath, storeOpt, utc, dryRun, json, useColor);
+      }
+      return;
+    }
+    if (leaderboard) {
+      if (week && allTime) {
+        process.stderr.write('copilot-price: choose only one of --week / --all-time.\n');
+        process.exitCode = 1;
+        return;
+      }
+      const cfg = requireLeague();
+      if (cfg) {
+        const window: LeaderboardWindow = week ? 'week' : allTime ? 'all' : 'today';
+        await runLeaderboard(cfg, window, utc, json, useColor);
+      }
       return;
     }
 
@@ -364,12 +702,29 @@ const cmd = command({
         process.exitCode = 1;
         return;
       }
+
+      // Opt into auto-publish only if --publish is set AND a league is configured.
+      let pubCtx: { cfg: LeagueConfig; utc: boolean } | null = null;
+      if (publishFlag) {
+        const cfg = loadLeagueQuiet();
+        if (cfg) {
+          loadRateCard(); // publishing prices the un-metered split via the rate card
+          pubCtx = { cfg, utc };
+        } else {
+          process.stderr.write('copilot-price: --publish ignored — no league configured (run --join first).\n');
+        }
+      }
+
       if (watch) {
-        runWatch(dbPath, store, parseIntervalSec(interval));
+        runWatch(dbPath, store, parseIntervalSec(interval), pubCtx);
         return; // the interval loop owns the process lifetime
       }
       const res = runIngest(dbPath, store, Date.now());
       printIngestSummary(res, store, json);
+      // One-shot: await the publish so it completes before we exit (errors swallowed).
+      if (pubCtx) {
+        await publishTodayBestEffort(pubCtx.cfg, store, pubCtx.utc);
+      }
       store.close();
       return;
     }
@@ -447,4 +802,7 @@ const cmd = command({
   },
 });
 
-run(cmd, process.argv.slice(2));
+void Promise.resolve(run(cmd, process.argv.slice(2))).catch((e) => {
+  process.stderr.write('copilot-price: ' + errorMessage(e) + '\n');
+  process.exitCode = 1;
+});

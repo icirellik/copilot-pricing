@@ -70,6 +70,8 @@ export interface IngestResult {
 export interface UsageStore {
   ingest(spans: RawChatSpan[], nowMs: number): IngestResult;
   aggregateSince(sinceMs: number): PerModelAggregate[];
+  /** Like aggregateSince but bounded to a half-open window (start, end] — for per-day backfill. */
+  aggregateBetween(startMs: number, endMs: number): PerModelAggregate[];
   earliestEndSince(sinceMs: number): number;
   totalRows(): number;
   /** Epoch ms of the last ingest (0 if never) — for doctor/coverage recency. */
@@ -175,6 +177,15 @@ class UsageStoreImpl implements UsageStore {
   }
 
   aggregateSince(sinceMs: number): PerModelAggregate[] {
+    return this.aggregate(' WHERE end_time_ms > ?', [sinceMs]);
+  }
+
+  aggregateBetween(startMs: number, endMs: number): PerModelAggregate[] {
+    return this.aggregate(' WHERE end_time_ms > ? AND end_time_ms <= ?', [startMs, endMs]);
+  }
+
+  /** Shared per-model aggregation; `where` is appended before GROUP BY with its params. */
+  private aggregate(where: string, params: number[]): PerModelAggregate[] {
     const rows = this.db
       .prepare(
         'SELECT model,' +
@@ -189,9 +200,11 @@ class UsageStoreImpl implements UsageStore {
           ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN output_tokens END), 0) AS unmeteredOutputTokens,' +
           ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN cache_read_tokens END), 0) AS unmeteredCacheReadTokens,' +
           ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN cache_creation_tokens END), 0) AS unmeteredCacheCreationTokens' +
-          ' FROM chat_spans WHERE end_time_ms > ? GROUP BY model',
+          ' FROM chat_spans' +
+          where +
+          ' GROUP BY model',
       )
-      .all(sinceMs) as Array<{
+      .all(...params) as Array<{
       model: string | null;
       chats: number | bigint | null;
       inputTokens: number | bigint | null;
