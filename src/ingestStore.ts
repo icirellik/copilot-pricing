@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import type { SourceBucket } from './format';
 import type { PerModelAggregate, RawChatSpan } from './otelReader';
 
 // See otelReader.ts for why node:sqlite is loaded via createRequire.
@@ -62,6 +63,59 @@ const UPSERT_SQL =
   '  conversation_id = excluded.conversation_id,' +
   '  last_seen_ms = excluded.last_seen_ms';
 
+// Shared aggregation column list (everything after the grouping key(s)).
+const AGG_COLS =
+  ' COUNT(*) AS chats,' +
+  ' COALESCE(SUM(input_tokens), 0) AS inputTokens,' +
+  ' COALESCE(SUM(output_tokens), 0) AS outputTokens,' +
+  ' COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,' +
+  ' COALESCE(SUM(cache_creation_tokens), 0) AS cacheCreationTokens,' +
+  ' COALESCE(SUM(usage_nano_aiu), 0) AS meteredNano,' +
+  ' SUM(CASE WHEN usage_nano_aiu IS NOT NULL THEN 1 ELSE 0 END) AS meteredChats,' +
+  ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN input_tokens END), 0) AS unmeteredInputTokens,' +
+  ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN output_tokens END), 0) AS unmeteredOutputTokens,' +
+  ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN cache_read_tokens END), 0) AS unmeteredCacheReadTokens,' +
+  ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN cache_creation_tokens END), 0) AS unmeteredCacheCreationTokens';
+
+// Classify a chat span by who produced it (see UsageStore.sessionsSince rationale):
+// subagent calls use a 'toolu_' tool-call id; background helpers carry no session.
+const BUCKET_EXPR =
+  "CASE WHEN chat_session_id LIKE 'toolu_%' THEN 'subagent'" +
+  " WHEN chat_session_id IS NULL OR chat_session_id = '' THEN 'background'" +
+  " ELSE 'direct' END";
+
+interface AggRow {
+  model: string | null;
+  chats: number | bigint | null;
+  inputTokens: number | bigint | null;
+  outputTokens: number | bigint | null;
+  cacheReadTokens: number | bigint | null;
+  cacheCreationTokens: number | bigint | null;
+  meteredNano: number | bigint | null;
+  meteredChats: number | bigint | null;
+  unmeteredInputTokens: number | bigint | null;
+  unmeteredOutputTokens: number | bigint | null;
+  unmeteredCacheReadTokens: number | bigint | null;
+  unmeteredCacheCreationTokens: number | bigint | null;
+}
+
+function toAggregate(r: AggRow): PerModelAggregate {
+  return {
+    model: r.model,
+    chats: toInt(r.chats),
+    inputTokens: toInt(r.inputTokens),
+    outputTokens: toInt(r.outputTokens),
+    cacheReadTokens: toInt(r.cacheReadTokens),
+    cacheCreationTokens: toInt(r.cacheCreationTokens),
+    meteredAiu: toInt(r.meteredNano) / 1e9,
+    meteredChats: toInt(r.meteredChats),
+    unmeteredInputTokens: toInt(r.unmeteredInputTokens),
+    unmeteredOutputTokens: toInt(r.unmeteredOutputTokens),
+    unmeteredCacheReadTokens: toInt(r.unmeteredCacheReadTokens),
+    unmeteredCacheCreationTokens: toInt(r.unmeteredCacheCreationTokens),
+  };
+}
+
 export interface IngestResult {
   seen: number;
   inserted: number;
@@ -72,6 +126,8 @@ export interface UsageStore {
   aggregateSince(sinceMs: number): PerModelAggregate[];
   /** Like aggregateSince but bounded to a half-open window (start, end] — for per-day backfill. */
   aggregateBetween(startMs: number, endMs: number): PerModelAggregate[];
+  /** Per-(source bucket, model) aggregates since sinceMs — for the --breakdown view. */
+  bucketAggregateSince(sinceMs: number): Array<PerModelAggregate & { bucket: SourceBucket }>;
   earliestEndSince(sinceMs: number): number;
   /** Distinct human chat sessions since sinceMs (excludes background + subagent calls). */
   sessionsSince(sinceMs: number): number;
@@ -189,52 +245,18 @@ class UsageStoreImpl implements UsageStore {
   /** Shared per-model aggregation; `where` is appended before GROUP BY with its params. */
   private aggregate(where: string, params: number[]): PerModelAggregate[] {
     const rows = this.db
-      .prepare(
-        'SELECT model,' +
-          ' COUNT(*) AS chats,' +
-          ' COALESCE(SUM(input_tokens), 0) AS inputTokens,' +
-          ' COALESCE(SUM(output_tokens), 0) AS outputTokens,' +
-          ' COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,' +
-          ' COALESCE(SUM(cache_creation_tokens), 0) AS cacheCreationTokens,' +
-          ' COALESCE(SUM(usage_nano_aiu), 0) AS meteredNano,' +
-          ' SUM(CASE WHEN usage_nano_aiu IS NOT NULL THEN 1 ELSE 0 END) AS meteredChats,' +
-          ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN input_tokens END), 0) AS unmeteredInputTokens,' +
-          ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN output_tokens END), 0) AS unmeteredOutputTokens,' +
-          ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN cache_read_tokens END), 0) AS unmeteredCacheReadTokens,' +
-          ' COALESCE(SUM(CASE WHEN usage_nano_aiu IS NULL THEN cache_creation_tokens END), 0) AS unmeteredCacheCreationTokens' +
-          ' FROM chat_spans' +
-          where +
-          ' GROUP BY model',
-      )
-      .all(...params) as Array<{
-      model: string | null;
-      chats: number | bigint | null;
-      inputTokens: number | bigint | null;
-      outputTokens: number | bigint | null;
-      cacheReadTokens: number | bigint | null;
-      cacheCreationTokens: number | bigint | null;
-      meteredNano: number | bigint | null;
-      meteredChats: number | bigint | null;
-      unmeteredInputTokens: number | bigint | null;
-      unmeteredOutputTokens: number | bigint | null;
-      unmeteredCacheReadTokens: number | bigint | null;
-      unmeteredCacheCreationTokens: number | bigint | null;
-    }>;
+      .prepare('SELECT model,' + AGG_COLS + ' FROM chat_spans' + where + ' GROUP BY model')
+      .all(...params) as unknown as AggRow[];
+    return rows.map(toAggregate);
+  }
 
-    return rows.map((r) => ({
-      model: r.model,
-      chats: toInt(r.chats),
-      inputTokens: toInt(r.inputTokens),
-      outputTokens: toInt(r.outputTokens),
-      cacheReadTokens: toInt(r.cacheReadTokens),
-      cacheCreationTokens: toInt(r.cacheCreationTokens),
-      meteredAiu: toInt(r.meteredNano) / 1e9,
-      meteredChats: toInt(r.meteredChats),
-      unmeteredInputTokens: toInt(r.unmeteredInputTokens),
-      unmeteredOutputTokens: toInt(r.unmeteredOutputTokens),
-      unmeteredCacheReadTokens: toInt(r.unmeteredCacheReadTokens),
-      unmeteredCacheCreationTokens: toInt(r.unmeteredCacheCreationTokens),
-    }));
+  bucketAggregateSince(sinceMs: number): Array<PerModelAggregate & { bucket: SourceBucket }> {
+    const rows = this.db
+      .prepare(
+        'SELECT ' + BUCKET_EXPR + ' AS bucket, model,' + AGG_COLS + ' FROM chat_spans WHERE end_time_ms > ? GROUP BY bucket, model',
+      )
+      .all(sinceMs) as unknown as Array<AggRow & { bucket: string }>;
+    return rows.map((r) => ({ ...toAggregate(r), bucket: r.bucket as SourceBucket }));
   }
 
   earliestEndSince(sinceMs: number): number {

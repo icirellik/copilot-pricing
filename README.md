@@ -29,6 +29,19 @@ Month to date: 612.40 AIC  (≈ $6.12)
 > requests per chat (each tool round-trip and background helper is its own
 > request/span), so the per-model `REQUESTS` column far exceeds the number of
 > chats you opened — the **Sessions today** line shows that conversation count.
+> Pass `--breakdown` to see where the AIC actually went:
+>
+> ```
+> By source:
+>   Direct chats  14903.22 AIC  777 req
+>   Subagents       901.63 AIC  180 req
+>   Background        0.00 AIC  645 req (free)
+> ```
+>
+> Sources are inferred from the `chat_session_id` shape — subagents use a
+> `toolu_` tool-call id, background helpers (title-gen, todo agent, the
+> language-model wrapper) carry none. These are heuristics that can drift if
+> Copilot changes those identifiers.
 
 ## Requirements
 
@@ -88,6 +101,7 @@ Notes:
 copilot-price             # today's usage (since local midnight)
 copilot-price --utc       # since UTC midnight instead
 copilot-price --json      # machine-readable output
+copilot-price --breakdown # add an AIC-by-source split (direct / subagent / background)
 copilot-price --doctor    # diagnose DB detection, the durable store, and recorded usage
 copilot-price --db <path> # point at a specific agent-traces.db
 copilot-price --store <p> # point at a specific durable store

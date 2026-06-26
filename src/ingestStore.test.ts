@@ -129,6 +129,24 @@ describe('UsageStore', () => {
     expect(store.sessionsSince(MIDNIGHT)).toBe(2); // sessA, sessB
   });
 
+  it('bucketAggregateSince groups by source (direct / subagent / background)', () => {
+    store.ingest(
+      [
+        span({ spanId: 'd1', chatSessionId: 'sessA', usageNanoAiu: 5_000_000_000, endTimeMs: MIDNIGHT + 1000 }),
+        span({ spanId: 'd2', chatSessionId: 'sessA', usageNanoAiu: 1_000_000_000, endTimeMs: MIDNIGHT + 1100 }),
+        span({ spanId: 's1', chatSessionId: 'toolu_abc', usageNanoAiu: 2_000_000_000, endTimeMs: MIDNIGHT + 1200 }),
+        span({ spanId: 'b1', chatSessionId: '', usageNanoAiu: 0, endTimeMs: MIDNIGHT + 1300 }),
+        span({ spanId: 'b2', chatSessionId: null, usageNanoAiu: 0, endTimeMs: MIDNIGHT + 1400 }),
+      ],
+      NOW,
+    );
+    const byBucket = Object.fromEntries(store.bucketAggregateSince(MIDNIGHT).map((r) => [r.bucket, r]));
+    expect(Object.keys(byBucket).sort()).toEqual(['background', 'direct', 'subagent']);
+    expect(byBucket.direct).toMatchObject({ chats: 2, meteredAiu: 6 });
+    expect(byBucket.subagent).toMatchObject({ chats: 1, meteredAiu: 2 });
+    expect(byBucket.background).toMatchObject({ chats: 2, meteredAiu: 0 });
+  });
+
   it('handles an empty ingest', () => {
     expect(store.ingest([], NOW)).toEqual({ seen: 0, inserted: 0 });
     expect(store.totalRows()).toBe(0);

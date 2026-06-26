@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import { command, flag, optional, option, run, string } from 'cmd-ts';
 import pc from 'picocolors';
 import { listDbCandidates, resolveDbPath } from './dbLocator';
-import { buildReport, formatJson, formatReport, type UsageCoverage } from './format';
+import { buildReport, formatJson, formatReport, type SourceBreakdownRow, type SourceBucket, type UsageCoverage } from './format';
 import { openUsageStore, resolveStorePath, type UsageStore } from './ingestStore';
 import { errorMessage, log, setDebug } from './logger';
 import { createOTelReader, type OTelReader, type PerModelAggregate } from './otelReader';
@@ -329,6 +329,25 @@ function printSchedule(targetRaw: string, intervalSec: number, storeOpt: string 
   }
 }
 
+/** Price each source bucket via buildReport so the parts sum to the headline AIC. */
+function buildBreakdown(bucketRows: Array<PerModelAggregate & { bucket: SourceBucket }>, sinceMs: number): SourceBreakdownRow[] {
+  const order: Array<{ bucket: SourceBucket; label: string }> = [
+    { bucket: 'direct', label: 'Direct chats' },
+    { bucket: 'subagent', label: 'Subagents' },
+    { bucket: 'background', label: 'Background' },
+  ];
+  const out: SourceBreakdownRow[] = [];
+  for (const { bucket, label } of order) {
+    const aggs = bucketRows.filter((r) => r.bucket === bucket);
+    if (aggs.length === 0) {
+      continue;
+    }
+    const rep = buildReport(aggs, sinceMs);
+    out.push({ bucket, label, requests: rep.totals.chats, aic: rep.totals.aic });
+  }
+  return out;
+}
+
 // --- League (friends leaderboard) --------------------------------------------
 
 /** Load the saved league config, or print a friendly error and return null. */
@@ -583,6 +602,7 @@ const cmd = command({
       description: 'Print a scheduler unit (auto|launchd|cron|systemd) and exit; installs nothing.',
     }),
     doctor: flag({ long: 'doctor', description: 'Diagnose database detection, the durable store, and recorded usage.' }),
+    breakdown: flag({ long: 'breakdown', description: "Break today's AIC down by source (direct chats / subagents / background)." }),
     debug: flag({ long: 'debug', description: 'Print debug logging to stderr.' }),
     noColor: flag({ long: 'no-color', description: 'Disable colored output.' }),
     // League (friends leaderboard).
@@ -611,6 +631,7 @@ const cmd = command({
       interval,
       schedule,
       doctor,
+      breakdown,
       debug,
       noColor,
       makeLeagueCode,
@@ -804,6 +825,11 @@ const cmd = command({
         const monthStart = monthStartMs(utc);
         const monthAic = buildReport(store.aggregateSince(monthStart), monthStart).totals.aic;
         report.monthToDate = { sinceMs: monthStart, aic: monthAic, usd: monthAic / 100 };
+      }
+      if (breakdown && store) {
+        report.breakdown = buildBreakdown(store.bucketAggregateSince(since), since);
+      } else if (breakdown && !store) {
+        process.stderr.write('copilot-price: --breakdown needs the durable store (drop --no-ingest).\n');
       }
       process.stdout.write(json ? formatJson(report) + '\n' : formatReport(report, useColor));
     } finally {

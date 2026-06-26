@@ -118,6 +118,22 @@ describe('formatReport', () => {
     expect(out).toContain('3 model requests'); // 2 + 1 chats across the aggregates
   });
 
+  it('renders a By source breakdown when present, marking free buckets', () => {
+    const report = buildReport(aggregates, MIDNIGHT);
+    report.breakdown = [
+      { bucket: 'direct', label: 'Direct chats', requests: 721, aic: 13775.82 },
+      { bucket: 'subagent', label: 'Subagents', requests: 169, aic: 823.48 },
+      { bucket: 'background', label: 'Background', requests: 639, aic: 0 },
+    ];
+    const out = formatReport(report, false);
+    expect(out).toContain('By source:');
+    expect(out).toContain('Direct chats');
+    expect(out).toContain('13775.82 AIC');
+    expect(out).toContain('Subagents');
+    expect(out).toContain('Background');
+    expect(out).toContain('(free)'); // background is 0 AIC
+  });
+
   it('renders a month-to-date headline when present', () => {
     const report = buildReport(aggregates, MIDNIGHT);
     report.monthToDate = { sinceMs: MIDNIGHT, aic: 1234.56, usd: 12.3456 };

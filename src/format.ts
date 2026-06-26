@@ -22,6 +22,17 @@ export interface UsageRow {
   estimatedUnpriced: boolean;
 }
 
+/** Which actor produced a model request, for the --breakdown view. */
+export type SourceBucket = 'direct' | 'subagent' | 'background';
+
+/** One row of the AIC-by-source breakdown. */
+export interface SourceBreakdownRow {
+  bucket: SourceBucket;
+  label: string;
+  requests: number;
+  aic: number;
+}
+
 /** Where today's numbers came from and how complete they are. */
 export interface UsageCoverage {
   /** 'store' = our durable copy (recommended); 'live' = source DB only. */
@@ -59,6 +70,8 @@ export interface UsageReport {
   sessions?: number;
   /** Month-to-date totals from the durable store (omitted when unavailable). */
   monthToDate?: { sinceMs: number; aic: number; usd: number };
+  /** AIC split by source (direct / subagent / background); present with --breakdown. */
+  breakdown?: SourceBreakdownRow[];
 }
 
 // If the earliest usage we can account for today starts more than this long
@@ -252,7 +265,30 @@ export function formatReport(report: UsageReport, useColor = true): string {
   for (const notice of coverageNotices(report, c)) {
     lines.push(notice);
   }
+  for (const line of breakdownLines(report, c)) {
+    lines.push(line);
+  }
   return lines.join('\n') + '\n';
+}
+
+/** "By source" AIC attribution block (direct / subagent / background). */
+function breakdownLines(report: UsageReport, c: typeof pc): string[] {
+  const rows = report.breakdown;
+  if (!rows || rows.length === 0) {
+    return [];
+  }
+  const labelW = Math.max(...rows.map((r) => r.label.length));
+  const aicW = Math.max(...rows.map((r) => aic(r.aic).length));
+  const out = ['', c.bold('By source:')];
+  for (const r of rows) {
+    const free = r.aic === 0 ? c.dim(' (free)') : '';
+    out.push(
+      `  ${r.label.padEnd(labelW)}  ${c.bold(`${pad(aic(r.aic), aicW, 'right')} AIC`)}` +
+        c.dim(`  ${num(r.requests)} req`) +
+        free,
+    );
+  }
+  return out;
 }
 
 /** Month-to-date headline (durable store only). */
