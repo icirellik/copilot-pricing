@@ -4,24 +4,31 @@ A small CLI that shows your **GitHub Copilot AI credit (AIC) usage for today** �
 midnight — broken down per model, with a USD estimate.
 
 It reads what VS Code's Copilot Chat extension records in a local OTel SQLite database
-(`agent-traces.db`). For each chat it uses **Copilot's own billed credit value** (the
+(`agent-traces.db`). For each model request it uses **Copilot's own billed credit value** (the
 `copilot_usage_nano_aiu` attribute — its authoritative AI-Unit figure, 1 AIU ≈ 1 AIC ≈ $0.01),
-and falls back to pricing the per-span token counts with a bundled rate card only for chats
+and falls back to pricing the per-span token counts with a bundled rate card only for requests
 that lack a stored value. Nothing is sent anywhere — prompt/response content is never read,
 only aggregate usage.
 
 ```
-Copilot AI credit usage — 6/2/2026, 12:30:00 PM
+Copilot AI credit usage — since 6/2/2026, 12:00:00 AM
 
-MODEL              CHATS    INPUT   OUTPUT  CACHE R  CACHE W     AIC
-─────────────────  ─────  ───────  ───────  ───────  ───────  ──────
-Claude Sonnet 4.6     12  240,118   18,402  120,400    8,210   58.12
-GPT-5.2                4   40,002    2,110   10,000        0    9.40
-─────────────────  ─────  ───────  ───────  ───────  ───────  ──────
-TOTAL                 16  280,120   20,512  130,400    8,210   67.52
+MODEL              REQUESTS    INPUT   OUTPUT  CACHE R  CACHE W     AIC
+─────────────────  ────────  ───────  ───────  ───────  ───────  ──────
+Claude Sonnet 4.6        47  240,118   18,402  120,400    8,210   58.12
+GPT-5.2                  12   40,002    2,110   10,000        0    9.40
+─────────────────  ────────  ───────  ───────  ───────  ───────  ──────
+TOTAL                    59  280,120   20,512  130,400    8,210   67.52
 
 Total: 67.52 AIC  (≈ $0.68, 439,242 tokens)
+Sessions today: 3  (59 model requests)
+Month to date: 612.40 AIC  (≈ $6.12)
 ```
+
+> **REQUESTS, not conversations.** In agent mode Copilot issues many model
+> requests per chat (each tool round-trip and background helper is its own
+> request/span), so the per-model `REQUESTS` column far exceeds the number of
+> chats you opened — the **Sessions today** line shows that conversation count.
 
 ## Requirements
 

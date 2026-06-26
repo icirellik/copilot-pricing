@@ -108,6 +108,16 @@ describe('formatReport', () => {
     expect(out).toContain('No Copilot chat usage');
   });
 
+  it('labels the count column REQUESTS and renders a sessions line when present', () => {
+    const report = buildReport(aggregates, MIDNIGHT);
+    report.sessions = 4;
+    const out = formatReport(report, false);
+    expect(out).toContain('REQUESTS');
+    expect(out).not.toContain('CHATS');
+    expect(out).toContain('Sessions today: 4');
+    expect(out).toContain('3 model requests'); // 2 + 1 chats across the aggregates
+  });
+
   it('renders a month-to-date headline when present', () => {
     const report = buildReport(aggregates, MIDNIGHT);
     report.monthToDate = { sinceMs: MIDNIGHT, aic: 1234.56, usd: 12.3456 };

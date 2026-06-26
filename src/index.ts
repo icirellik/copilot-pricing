@@ -794,6 +794,9 @@ const cmd = command({
       }
 
       const report = buildReport(aggregates, since, coverage);
+      // Human chat-session count today (agent mode logs many model requests per
+      // chat, so REQUESTS far exceeds the conversations a person opened).
+      report.sessions = store ? store.sessionsSince(since) : sourceReader ? sourceReader.sessionsSince(since) : undefined;
       // Month-to-date headline, from the durable store only (the live source is
       // pruned and can't cover a whole month). aggregateSince(monthStart) is
       // month-to-date since there are no future spans.

@@ -42,6 +42,14 @@ function seedDb(path: string): void {
   // non-chat operation → excluded everywhere
   insSpan.run('s5', 'gpt-test', 500, 500, 0, MIDNIGHT + 4000, 'execute_tool');
 
+  // Session ids: s1/s2 share a human session, s3 another; s4 (pre-midnight) is a
+  // subagent toolu_ session that must be excluded from sessionsSince.
+  const updSession = db.prepare('UPDATE spans SET chat_session_id = ? WHERE span_id = ?');
+  updSession.run('sessA', 's1');
+  updSession.run('sessA', 's2');
+  updSession.run('sessB', 's3');
+  updSession.run('toolu_bdrk_x', 's4');
+
   const insAttr = db.prepare('INSERT INTO span_attributes (span_id, key, value) VALUES (?, ?, ?)');
   insAttr.run('s1', 'gen_ai.usage.cache_creation.input_tokens', '5');
   // s1 carries Copilot's stored credits (2e9 nano = 2.0 AIU); s2/s3 do not.
@@ -136,6 +144,14 @@ describe('OTelReader', () => {
     const spans = reader.readChatSpans(MIDNIGHT);
     reader.close();
     expect(spans.map((s) => s.spanId).sort()).toEqual(['s1', 's2', 's3']); // s4 is before midnight
+  });
+
+  it('sessionsSince counts distinct human sessions, excluding subagent/background', () => {
+    const reader = createOTelReader(dbPath);
+    // s1+s2 = sessA, s3 = sessB (both after midnight); s4 is pre-midnight toolu_; s5 is non-chat.
+    expect(reader.sessionsSince(MIDNIGHT)).toBe(2);
+    expect(reader.sessionsSince(MIDNIGHT + 10_000)).toBe(0);
+    reader.close();
   });
 
   it('earliestEndSince returns the earliest post-boundary chat end', () => {

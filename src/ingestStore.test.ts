@@ -113,6 +113,22 @@ describe('UsageStore', () => {
     expect(store.earliestEndSince(MIDNIGHT + 9000)).toBe(0);
   });
 
+  it('sessionsSince counts distinct human sessions, excluding background + subagent calls', () => {
+    store.ingest(
+      [
+        span({ spanId: 'a', chatSessionId: 'sessA', endTimeMs: MIDNIGHT + 1000 }),
+        span({ spanId: 'b', chatSessionId: 'sessA', endTimeMs: MIDNIGHT + 1100 }), // same session
+        span({ spanId: 'c', chatSessionId: 'sessB', endTimeMs: MIDNIGHT + 1200 }),
+        span({ spanId: 'd', chatSessionId: '', endTimeMs: MIDNIGHT + 1300 }), // background (no session)
+        span({ spanId: 'e', chatSessionId: null, endTimeMs: MIDNIGHT + 1400 }), // background
+        span({ spanId: 'f', chatSessionId: 'toolu_bdrk_123', endTimeMs: MIDNIGHT + 1500 }), // subagent
+        span({ spanId: 'g', chatSessionId: 'sessOld', endTimeMs: MIDNIGHT - 1000 }), // before boundary
+      ],
+      NOW,
+    );
+    expect(store.sessionsSince(MIDNIGHT)).toBe(2); // sessA, sessB
+  });
+
   it('handles an empty ingest', () => {
     expect(store.ingest([], NOW)).toEqual({ seen: 0, inserted: 0 });
     expect(store.totalRows()).toBe(0);

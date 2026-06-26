@@ -73,6 +73,8 @@ export interface UsageStore {
   /** Like aggregateSince but bounded to a half-open window (start, end] — for per-day backfill. */
   aggregateBetween(startMs: number, endMs: number): PerModelAggregate[];
   earliestEndSince(sinceMs: number): number;
+  /** Distinct human chat sessions since sinceMs (excludes background + subagent calls). */
+  sessionsSince(sinceMs: number): number;
   totalRows(): number;
   /** Epoch ms of the last ingest (0 if never) — for doctor/coverage recency. */
   lastIngestMs(): number;
@@ -240,6 +242,21 @@ class UsageStoreImpl implements UsageStore {
       | { minTs: number | bigint | null }
       | undefined;
     return toInt(row?.minTs);
+  }
+
+  // Count human-initiated chat sessions, not model requests. Background agents
+  // (title-gen, todo agent, the language-model wrapper) carry no session id, and
+  // subagent tool invocations use a 'toolu_'-prefixed tool-call id as the session
+  // — both are excluded so this reflects the chats a person actually opened.
+  sessionsSince(sinceMs: number): number {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(DISTINCT chat_session_id) AS c FROM chat_spans" +
+          " WHERE end_time_ms > ? AND chat_session_id IS NOT NULL AND chat_session_id != ''" +
+          " AND chat_session_id NOT LIKE 'toolu%'",
+      )
+      .get(sinceMs) as { c: number | bigint | null } | undefined;
+    return toInt(row?.c);
   }
 
   totalRows(): number {

@@ -89,6 +89,8 @@ export interface OTelReader {
   readChatSpans(sinceMs?: number): RawChatSpan[];
   /** Earliest chat span END time after sinceMs (0 if none) — for coverage. */
   earliestEndSince(sinceMs: number): number;
+  /** Distinct human chat sessions after sinceMs (excludes background + subagent calls). */
+  sessionsSince(sinceMs: number): number;
   getLatestTimestamp(): number;
   getDiagnostics(): Diagnostics;
   close(): void;
@@ -272,6 +274,23 @@ class OTelReaderImpl implements OTelReader {
       .prepare('SELECT MIN(end_time_ms) AS minTs FROM spans WHERE operation_name = ? AND end_time_ms > ?')
       .get(OPERATION_NAME_CHAT, sinceMs) as { minTs: number | bigint | null } | undefined;
     return toFiniteInt(row?.minTs);
+  }
+
+  // Human-initiated chat sessions only — see UsageStore.sessionsSince for the
+  // rationale behind the empty/NULL and 'toolu_' (subagent) exclusions.
+  sessionsSince(sinceMs: number): number {
+    const db = this.ensureDb();
+    if (!db) {
+      return 0;
+    }
+    const row = db
+      .prepare(
+        "SELECT COUNT(DISTINCT chat_session_id) AS c FROM spans" +
+          " WHERE operation_name = ? AND end_time_ms > ? AND chat_session_id IS NOT NULL" +
+          " AND chat_session_id != '' AND chat_session_id NOT LIKE 'toolu%'",
+      )
+      .get(OPERATION_NAME_CHAT, sinceMs) as { c: number | bigint | null } | undefined;
+    return toFiniteInt(row?.c);
   }
 
   getLatestTimestamp(): number {

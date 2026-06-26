@@ -55,6 +55,8 @@ export interface UsageReport {
   /** Models with un-metered chats and no rate-card match (counted as 0). */
   unpricedModels: string[];
   coverage?: UsageCoverage;
+  /** Distinct human chat sessions today (the conversation count, vs. request count). */
+  sessions?: number;
   /** Month-to-date totals from the durable store (omitted when unavailable). */
   monthToDate?: { sinceMs: number; aic: number; usd: number };
 }
@@ -161,7 +163,9 @@ interface Column {
 
 const COLUMNS: Column[] = [
   { header: 'MODEL', align: 'left', value: (r) => (r.estimatedUnpriced ? `${r.model} *` : r.model) },
-  { header: 'CHATS', align: 'right', value: (r) => num(r.chats) },
+  // One row per model REQUEST (agent mode logs each model call as a span), not
+  // per human chat — see the "Sessions today" footer for the conversation count.
+  { header: 'REQUESTS', align: 'right', value: (r) => num(r.chats) },
   { header: 'INPUT', align: 'right', value: (r) => num(r.inputTokens) },
   { header: 'OUTPUT', align: 'right', value: (r) => num(r.outputTokens) },
   { header: 'CACHE R', align: 'right', value: (r) => num(r.cacheReadTokens) },
@@ -233,6 +237,11 @@ export function formatReport(report: UsageReport, useColor = true): string {
   lines.push(
     c.bold(`Total: ${aic(report.totals.aic)} AIC`) + c.dim(`  (≈ ${usd(report.totals.usd)}, ${num(report.totals.tokens)} tokens)`),
   );
+  if (report.sessions !== undefined) {
+    lines.push(
+      c.bold(`Sessions today: ${num(report.sessions)}`) + c.dim(`  (${num(report.totals.chats)} model requests)`),
+    );
+  }
   if (report.monthToDate) {
     lines.push(monthLine(report.monthToDate, c));
   }
@@ -258,13 +267,13 @@ function sourceNote(report: UsageReport, c: typeof pc): string {
     return c.dim('AIC source: none.');
   }
   if (meteredChats === chats) {
-    return c.dim(`AIC source: Copilot's metered value for all ${num(chats)} chats.`);
+    return c.dim(`AIC source: Copilot's metered value for all ${num(chats)} requests.`);
   }
   if (meteredChats === 0) {
     return c.dim(`AIC source: estimated from the rate card (no metered values present).`);
   }
   return c.dim(
-    `AIC source: Copilot's metered value for ${num(meteredChats)}/${num(chats)} chats; ` +
+    `AIC source: Copilot's metered value for ${num(meteredChats)}/${num(chats)} requests; ` +
       `${num(chats - meteredChats)} estimated from the rate card (${aic(report.totals.estimatedAic)} AIC).`,
   );
 }
